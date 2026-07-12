@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { runAuditFromPdf } from "@/lib/audit-runner";
 import type { AuditTaskDetail, AuditTaskSummary, TaskStatus } from "@/lib/types";
+
+const STORAGE_KEY = "pdf-audit-workspace.tasks.v2";
 
 const statusCopy: Record<TaskStatus, string> = {
   queued: "排队中",
@@ -26,17 +29,73 @@ function formatTime(value: string | null) {
   }).format(new Date(value));
 }
 
-async function readError(response: Response) {
+function readStoredTasks(): AuditTaskDetail[] {
+  if (typeof window === "undefined") return [];
   try {
-    const payload = (await response.json()) as { error?: string };
-    return payload.error || "请求失败。";
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as AuditTaskDetail[];
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return "请求失败。";
+    return [];
   }
+}
+
+function writeStoredTasks(tasks: AuditTaskDetail[]) {
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks.slice(0, 80)));
+}
+
+function taskToSummary(task: AuditTaskDetail): AuditTaskSummary {
+  return {
+    id: task.id,
+    fileName: task.fileName,
+    fileSize: task.fileSize,
+    fileType: task.fileType,
+    status: task.status,
+    progress: task.progress,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    startedAt: task.startedAt,
+    completedAt: task.completedAt,
+    errorMessage: task.errorMessage,
+    issueCount: task.report?.issues.length ?? null,
+    summary: task.summary,
+  };
+}
+
+function saveTask(task: AuditTaskDetail) {
+  const current = readStoredTasks();
+  const next = [task, ...current.filter((item) => item.id !== task.id)].sort(
+    (a, b) => +new Date(b.createdAt) - +new Date(a.createdAt),
+  );
+  writeStoredTasks(next);
+  return next;
+}
+
+function createQueuedTask(file: File): AuditTaskDetail {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    fileName: file.name,
+    fileSize: file.size,
+    fileType: file.type || "application/pdf",
+    status: "queued",
+    progress: 5,
+    createdAt: now,
+    updatedAt: now,
+    startedAt: null,
+    completedAt: null,
+    errorMessage: null,
+    issueCount: null,
+    summary: null,
+    reportText: null,
+    report: null,
+  };
 }
 
 export function AuditConsole() {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const fileCacheRef = useRef(new Map<string, File>());
   const [tasks, setTasks] = useState<AuditTaskSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<AuditTaskDetail | null>(null);
@@ -49,34 +108,66 @@ export function AuditConsole() {
     [selectedId, tasks],
   );
 
-  const loadTasks = useCallback(async () => {
-    const response = await fetch("/api/tasks", { cache: "no-store" });
-    if (!response.ok) throw new Error(await readError(response));
-    const payload = (await response.json()) as { tasks: AuditTaskSummary[] };
-    setTasks(payload.tasks);
-    if (!selectedId && payload.tasks[0]) {
-      setSelectedId(payload.tasks[0].id);
-    }
-  }, [selectedId]);
-
-  const loadDetail = useCallback(async (id: string) => {
-    const response = await fetch(`/api/tasks/${id}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(await readError(response));
-    const payload = (await response.json()) as { task: AuditTaskDetail };
-    setDetail(payload.task);
+  const refreshFromStorage = useCallback((preferredId?: string | null) => {
+    const stored = readStoredTasks();
+    const summaries = stored.map(taskToSummary);
+    const nextSelectedId = preferredId ?? summaries[0]?.id ?? null;
+    setTasks(summaries);
+    setSelectedId(nextSelectedId);
+    setDetail(stored.find((task) => task.id === nextSelectedId) ?? null);
   }, []);
 
-  const runTask = useCallback(
-    async (id: string) => {
-      setNotice("任务已进入后台处理。你可以继续上传其他 PDF。");
-      const response = await fetch(`/api/tasks/${id}/run`, { method: "POST" });
-      if (!response.ok) {
-        setNotice(await readError(response));
+  const updateTask = useCallback((task: AuditTaskDetail) => {
+    const stored = saveTask(task);
+    setTasks(stored.map(taskToSummary));
+    setSelectedId(task.id);
+    setDetail(task);
+  }, []);
+
+  const processLocalTask = useCallback(
+    async (task: AuditTaskDetail, file: File) => {
+      const started: AuditTaskDetail = {
+        ...task,
+        status: "processing",
+        progress: 35,
+        startedAt: task.startedAt ?? new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        errorMessage: null,
+      };
+      updateTask(started);
+
+      try {
+        const { reportText, storedResult } = await runAuditFromPdf(
+          await file.arrayBuffer(),
+        );
+        const completed: AuditTaskDetail = {
+          ...started,
+          status: "completed",
+          progress: 100,
+          completedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          errorMessage: null,
+          reportText,
+          report: storedResult.report as AuditTaskDetail["report"],
+          summary: storedResult.summary,
+        };
+        updateTask(completed);
+        setNotice("处理完成。结果已保存到当前浏览器的历史任务中。");
+      } catch (error) {
+        const failed: AuditTaskDetail = {
+          ...started,
+          status: "failed",
+          progress: 100,
+          completedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          errorMessage:
+            error instanceof Error ? error.message : "PDF 处理失败。",
+        };
+        updateTask(failed);
+        setNotice(failed.errorMessage);
       }
-      await loadTasks();
-      await loadDetail(id).catch(() => undefined);
     },
-    [loadDetail, loadTasks],
+    [updateTask],
   );
 
   const uploadFiles = useCallback(
@@ -86,61 +177,60 @@ export function AuditConsole() {
           file.type === "application/pdf" ||
           file.name.toLowerCase().endsWith(".pdf"),
       );
+
       if (files.length === 0) {
         setNotice("请上传 PDF 文件。");
         return;
       }
 
       setBusy(true);
-      setNotice(`已接收 ${files.length} 个 PDF，正在创建并行任务。`);
+      setNotice(`已接收 ${files.length} 个 PDF，正在当前浏览器中并行处理。`);
+
       try {
+        const queuedTasks = files.map((file) => {
+          const task = createQueuedTask(file);
+          fileCacheRef.current.set(task.id, file);
+          updateTask(task);
+          return task;
+        });
+        setSelectedId(queuedTasks[0]?.id ?? null);
+        setDetail(queuedTasks[0] ?? null);
         await Promise.all(
-          files.map(async (file) => {
-            const form = new FormData();
-            form.append("file", file);
-            const response = await fetch("/api/tasks", {
-              method: "POST",
-              body: form,
-            });
-            if (!response.ok) throw new Error(await readError(response));
-            const payload = (await response.json()) as {
-              task: AuditTaskSummary;
-            };
-            setSelectedId(payload.task.id);
-            void runTask(payload.task.id);
-          }),
+          queuedTasks.map((task) =>
+            processLocalTask(task, fileCacheRef.current.get(task.id)!),
+          ),
         );
-        await loadTasks();
-      } catch (error) {
-        setNotice(error instanceof Error ? error.message : "上传失败。");
       } finally {
         setBusy(false);
         if (inputRef.current) inputRef.current.value = "";
       }
     },
-    [loadTasks, runTask],
+    [processLocalTask, updateTask],
+  );
+
+  const runTask = useCallback(
+    async (id: string) => {
+      const task = readStoredTasks().find((item) => item.id === id);
+      const file = fileCacheRef.current.get(id);
+      if (!task || !file) {
+        setNotice("历史结果可以直接回看；如需重新处理，请重新选择原 PDF 文件。");
+        return;
+      }
+      setNotice("任务正在当前浏览器中处理。你可以继续上传其他 PDF。");
+      await processLocalTask(task, file);
+    },
+    [processLocalTask],
   );
 
   useEffect(() => {
-    loadTasks().catch((error) =>
-      setNotice(error instanceof Error ? error.message : "读取任务失败。"),
-    );
-  }, [loadTasks]);
+    refreshFromStorage();
+  }, [refreshFromStorage]);
 
   useEffect(() => {
     if (!selectedId) return;
-    loadDetail(selectedId).catch(() => undefined);
-  }, [loadDetail, selectedId]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (tasks.some((task) => task.status === "queued" || task.status === "processing")) {
-        loadTasks().catch(() => undefined);
-        if (selectedId) loadDetail(selectedId).catch(() => undefined);
-      }
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [loadDetail, loadTasks, selectedId, tasks]);
+    const stored = readStoredTasks();
+    setDetail(stored.find((task) => task.id === selectedId) ?? null);
+  }, [selectedId, tasks]);
 
   const completedCount = tasks.filter((task) => task.status === "completed").length;
   const activeCount = tasks.filter(
@@ -155,14 +245,14 @@ export function AuditConsole() {
           <p className="eyebrow">PDF Audit Workspace</p>
           <h1>外网溯源结果报告自动核验台</h1>
           <p className="hero-text">
-            上传 PDF 后系统会创建后台任务，提取报告中的首页字段、结果表格和出处截图线索，
-            再复用现有规则输出核验结论。历史任务会保留，便于回看和复跑。
+            上传 PDF 后系统会在当前浏览器中创建任务，提取报告中的首页字段、结果表格和出处截图线索，
+            再复用现有规则输出核验结论。历史任务会保存在当前浏览器，便于回看。
           </p>
           <div className="hero-actions">
             <button type="button" onClick={() => inputRef.current?.click()}>
               上传 PDF
             </button>
-            <span>支持一次选择多个文件，并行处理。</span>
+            <span>支持一次选择多个文件，并行处理；PDF 不会上传到服务器。</span>
           </div>
         </div>
         <div className="hero-card" aria-label="任务概览">
@@ -171,7 +261,7 @@ export function AuditConsole() {
             <strong>{tasks.length}</strong>
           </div>
           <div>
-            <span>后台处理中</span>
+            <span>处理中</span>
             <strong>{activeCount}</strong>
           </div>
           <div>
@@ -213,7 +303,7 @@ export function AuditConsole() {
         <div>
           <h2>拖入或选择外网溯源报告</h2>
           <p>
-            文件会保存到任务记录中，处理完成后可在右侧查看结构化摘要、问题列表和完整中文报告。
+            文件会直接在浏览器内处理，结果保存到本机历史记录。不会再触发线上上传请求。
           </p>
         </div>
         <button
@@ -221,7 +311,7 @@ export function AuditConsole() {
           disabled={busy}
           onClick={() => inputRef.current?.click()}
         >
-          {busy ? "创建任务中" : "选择文件"}
+          {busy ? "处理中" : "选择文件"}
         </button>
       </section>
 
@@ -234,7 +324,7 @@ export function AuditConsole() {
               <p className="eyebrow">History</p>
               <h2>历史任务</h2>
             </div>
-            <button type="button" className="ghost" onClick={() => void loadTasks()}>
+            <button type="button" className="ghost" onClick={() => refreshFromStorage(selectedId)}>
               刷新
             </button>
           </div>

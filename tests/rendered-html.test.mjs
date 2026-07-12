@@ -17,7 +17,9 @@ test("defines the PDF audit workspace UI and metadata", async () => {
   assert.match(page, /<AuditConsole \/>/);
   assert.match(consoleSource, /外网溯源结果报告自动核验台/);
   assert.match(consoleSource, /Promise\.all/);
-  assert.match(consoleSource, /\/api\/tasks/);
+  assert.match(consoleSource, /localStorage/);
+  assert.match(consoleSource, /PDF 不会上传到服务器/);
+  assert.doesNotMatch(consoleSource, /\/api\/tasks/);
   assert.doesNotMatch(page + layout + consoleSource, /codex-preview|react-loading-skeleton/);
 });
 
