@@ -11,5 +11,5 @@
 - [x] 任务 4：PDF.js 渲染、客户端编排与 UI
 - [x] 检查点 B：真实模型冒烟测试（W3C 公开 PDF；业务样本未外发）
 - [x] 任务 5：移除旧链路、完善文档与全量验证
-- [ ] 检查 staged diff，确认无密钥/私钥/测试 PDF
-- [ ] 推送 GitHub 并创建 Draft PR
+- [x] 检查 staged diff，确认无密钥/私钥/测试 PDF
+- [x] 推送 GitHub 并创建 Draft PR
