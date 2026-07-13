@@ -1,23 +1,19 @@
-export type TaskStatus = "queued" | "processing" | "completed" | "failed";
+import type {
+  AuditOutcome,
+  AuditReport,
+  ExtractionSummary,
+} from "./ai/contracts";
 
-export type AuditIssueDto = {
-  code: string;
-  scope: string;
-  groupLabel: string | null;
-  resultId: string | null;
-  message: string;
-};
+export type TaskStatus =
+  | "queued"
+  | "rendering"
+  | "extracting"
+  | "finalizing"
+  | "completed"
+  | "failed";
 
-export type ExtractionSummary = {
-  parserMode: string;
-  pageCount: number | null;
-  extractedTextLength: number;
-  firstPageFields: number;
-  groupCount: number;
-  tableRowCount: number;
-  screenshotHeadingCount: number;
-  warnings: string[];
-};
+export type AuditIssueDto = AuditReport["issues"][number];
+export type { AuditOutcome, AuditReport, ExtractionSummary };
 
 export type AuditTaskSummary = {
   id: string;
@@ -25,7 +21,11 @@ export type AuditTaskSummary = {
   fileSize: number;
   fileType: string | null;
   status: TaskStatus;
+  outcome: AuditOutcome | null;
+  model: "qwen3.7-plus" | null;
   progress: number;
+  processedPages: number;
+  totalPages: number | null;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
@@ -37,9 +37,5 @@ export type AuditTaskSummary = {
 
 export type AuditTaskDetail = AuditTaskSummary & {
   reportText: string | null;
-  report: {
-    certificateIssues: AuditIssueDto[];
-    resultIssues: AuditIssueDto[];
-    issues: AuditIssueDto[];
-  } | null;
+  report: AuditReport | null;
 };

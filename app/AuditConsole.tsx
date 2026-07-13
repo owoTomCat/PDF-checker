@@ -1,16 +1,38 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { runAuditFromPdf } from "@/lib/audit-runner";
-import type { AuditTaskDetail, AuditTaskSummary, TaskStatus } from "@/lib/types";
+import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  runAiAuditPipeline,
+  type PipelineProgress,
+} from "@/lib/client/audit-pipeline";
+import type {
+  AuditOutcome,
+  AuditTaskDetail,
+  TaskStatus,
+} from "@/lib/types";
 
-const STORAGE_KEY = "pdf-audit-workspace.tasks.v2";
+const STORAGE_KEY = "pdf-audit-workspace.tasks.v3";
+const ACTIVE_STATUSES = new Set<TaskStatus>([
+  "queued",
+  "rendering",
+  "extracting",
+  "finalizing",
+]);
 
 const statusCopy: Record<TaskStatus, string> = {
   queued: "排队中",
-  processing: "处理中",
+  rendering: "渲染页面",
+  extracting: "AI 识别",
+  finalizing: "跨页归并",
   completed: "已完成",
   failed: "失败",
+};
+
+const outcomeCopy: Record<AuditOutcome, string> = {
+  passed: "核验通过",
+  issues_found: "发现问题",
+  needs_review: "需人工复核",
+  failed: "处理失败",
 };
 
 function formatBytes(bytes: number) {
@@ -29,13 +51,64 @@ function formatTime(value: string | null) {
   }).format(new Date(value));
 }
 
+function normalizeStoredTask(value: unknown): AuditTaskDetail | null {
+  if (!value || typeof value !== "object") return null;
+  const task = value as Partial<AuditTaskDetail>;
+  if (
+    typeof task.id !== "string" ||
+    typeof task.fileName !== "string" ||
+    typeof task.fileSize !== "number" ||
+    typeof task.createdAt !== "string"
+  ) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const status =
+    task.status && statusCopy[task.status]
+      ? task.status
+      : ("failed" as const);
+  return {
+    id: task.id,
+    fileName: task.fileName.slice(0, 255),
+    fileSize: task.fileSize,
+    fileType: typeof task.fileType === "string" ? task.fileType : null,
+    status,
+    outcome: task.outcome ?? (status === "failed" ? "failed" : null),
+    model: task.model === "qwen3.7-plus" ? task.model : null,
+    progress: typeof task.progress === "number" ? task.progress : 0,
+    processedPages:
+      typeof task.processedPages === "number" ? task.processedPages : 0,
+    totalPages: typeof task.totalPages === "number" ? task.totalPages : null,
+    createdAt: task.createdAt,
+    updatedAt: typeof task.updatedAt === "string" ? task.updatedAt : now,
+    startedAt: typeof task.startedAt === "string" ? task.startedAt : null,
+    completedAt:
+      typeof task.completedAt === "string" ? task.completedAt : null,
+    errorMessage:
+      typeof task.errorMessage === "string"
+        ? task.errorMessage.slice(0, 1_000)
+        : null,
+    issueCount: typeof task.issueCount === "number" ? task.issueCount : null,
+    summary: task.summary ?? null,
+    reportText:
+      typeof task.reportText === "string"
+        ? task.reportText.slice(0, 1_000_000)
+        : null,
+    report: task.report ?? null,
+  };
+}
+
 function readStoredTasks(): AuditTaskDetail[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as AuditTaskDetail[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(normalizeStoredTask)
+      .filter((task): task is AuditTaskDetail => task !== null)
+      .slice(0, 80);
   } catch {
     return [];
   }
@@ -45,29 +118,11 @@ function writeStoredTasks(tasks: AuditTaskDetail[]) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks.slice(0, 80)));
 }
 
-function taskToSummary(task: AuditTaskDetail): AuditTaskSummary {
-  return {
-    id: task.id,
-    fileName: task.fileName,
-    fileSize: task.fileSize,
-    fileType: task.fileType,
-    status: task.status,
-    progress: task.progress,
-    createdAt: task.createdAt,
-    updatedAt: task.updatedAt,
-    startedAt: task.startedAt,
-    completedAt: task.completedAt,
-    errorMessage: task.errorMessage,
-    issueCount: task.report?.issues.length ?? null,
-    summary: task.summary,
-  };
-}
-
 function saveTask(task: AuditTaskDetail) {
   const current = readStoredTasks();
-  const next = [task, ...current.filter((item) => item.id !== task.id)].sort(
-    (a, b) => +new Date(b.createdAt) - +new Date(a.createdAt),
-  );
+  const next = [task, ...current.filter((item) => item.id !== task.id)]
+    .sort((left, right) => +new Date(right.createdAt) - +new Date(left.createdAt))
+    .slice(0, 80);
   writeStoredTasks(next);
   return next;
 }
@@ -80,7 +135,11 @@ function createQueuedTask(file: File): AuditTaskDetail {
     fileSize: file.size,
     fileType: file.type || "application/pdf",
     status: "queued",
-    progress: 5,
+    outcome: null,
+    model: "qwen3.7-plus",
+    progress: 2,
+    processedPages: 0,
+    totalPages: null,
     createdAt: now,
     updatedAt: now,
     startedAt: null,
@@ -93,78 +152,101 @@ function createQueuedTask(file: File): AuditTaskDetail {
   };
 }
 
+function statusFromProgress(progress: PipelineProgress): TaskStatus {
+  return progress.stage;
+}
+
+function outcomeNotice(outcome: AuditOutcome, issueCount: number) {
+  if (outcome === "passed") return "AI 核验完成，未发现规则问题。";
+  if (outcome === "issues_found") {
+    return `AI 核验完成，发现 ${issueCount} 项问题。`;
+  }
+  if (outcome === "needs_review") {
+    return "AI 已完成识别，但证据不完整，结果需要人工复核。";
+  }
+  return "PDF 处理失败。";
+}
+
 export function AuditConsole() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const fileCacheRef = useRef(new Map<string, File>());
-  const [tasks, setTasks] = useState<AuditTaskSummary[]>([]);
+  const [tasks, setTasks] = useState<AuditTaskDetail[]>(readStoredTasks);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<AuditTaskDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
 
   const selectedTask = useMemo(
-    () => tasks.find((task) => task.id === selectedId) ?? null,
+    () => tasks.find((task) => task.id === selectedId) ?? tasks[0] ?? null,
     [selectedId, tasks],
   );
 
-  const refreshFromStorage = useCallback((preferredId?: string | null) => {
-    const stored = readStoredTasks();
-    const summaries = stored.map(taskToSummary);
-    const nextSelectedId = preferredId ?? summaries[0]?.id ?? null;
-    setTasks(summaries);
-    setSelectedId(nextSelectedId);
-    setDetail(stored.find((task) => task.id === nextSelectedId) ?? null);
-  }, []);
-
   const updateTask = useCallback((task: AuditTaskDetail) => {
-    const stored = saveTask(task);
-    setTasks(stored.map(taskToSummary));
+    setTasks(saveTask(task));
     setSelectedId(task.id);
-    setDetail(task);
   }, []);
 
-  const processLocalTask = useCallback(
+  const processTask = useCallback(
     async (task: AuditTaskDetail, file: File) => {
-      const started: AuditTaskDetail = {
+      let current: AuditTaskDetail = {
         ...task,
-        status: "processing",
-        progress: 35,
+        status: "rendering",
+        progress: 5,
         startedAt: task.startedAt ?? new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        completedAt: null,
         errorMessage: null,
+        outcome: null,
       };
-      updateTask(started);
+      updateTask(current);
 
       try {
-        const { reportText, storedResult } = await runAuditFromPdf(
-          await file.arrayBuffer(),
-        );
+        const result = await runAiAuditPipeline(file, {
+          onProgress(progress) {
+            current = {
+              ...current,
+              status: statusFromProgress(progress),
+              progress: progress.progress,
+              processedPages: progress.processedPages,
+              totalPages: progress.totalPages,
+              updatedAt: new Date().toISOString(),
+            };
+            updateTask(current);
+          },
+        });
         const completed: AuditTaskDetail = {
-          ...started,
+          ...current,
           status: "completed",
+          outcome: result.outcome,
+          model: result.model,
           progress: 100,
+          processedPages: result.summary.pageCount,
+          totalPages: result.summary.pageCount,
           completedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           errorMessage: null,
-          reportText,
-          report: storedResult.report as AuditTaskDetail["report"],
-          summary: storedResult.summary,
+          issueCount: result.report.issues.length,
+          summary: result.summary,
+          reportText: result.reportText,
+          report: result.report,
         };
         updateTask(completed);
-        setNotice("处理完成。结果已保存到当前浏览器的历史任务中。");
+        setNotice(
+          outcomeNotice(result.outcome, result.report.issues.length),
+        );
       } catch (error) {
+        const message = error instanceof Error ? error.message : "PDF 处理失败。";
         const failed: AuditTaskDetail = {
-          ...started,
+          ...current,
           status: "failed",
+          outcome: "failed",
           progress: 100,
           completedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
-          errorMessage:
-            error instanceof Error ? error.message : "PDF 处理失败。",
+          errorMessage: message,
         };
         updateTask(failed);
-        setNotice(failed.errorMessage);
+        setNotice(message);
       }
     },
     [updateTask],
@@ -177,15 +259,15 @@ export function AuditConsole() {
           file.type === "application/pdf" ||
           file.name.toLowerCase().endsWith(".pdf"),
       );
-
       if (files.length === 0) {
         setNotice("请上传 PDF 文件。");
         return;
       }
 
       setBusy(true);
-      setNotice(`已接收 ${files.length} 个 PDF，正在当前浏览器中并行处理。`);
-
+      setNotice(
+        `已接收 ${files.length} 个 PDF，将逐个渲染页面并交给 qwen3.7-plus 识别。`,
+      );
       try {
         const queuedTasks = files.map((file) => {
           const task = createQueuedTask(file);
@@ -193,66 +275,55 @@ export function AuditConsole() {
           updateTask(task);
           return task;
         });
-        setSelectedId(queuedTasks[0]?.id ?? null);
-        setDetail(queuedTasks[0] ?? null);
-        await Promise.all(
-          queuedTasks.map((task) =>
-            processLocalTask(task, fileCacheRef.current.get(task.id)!),
-          ),
-        );
+        for (const task of queuedTasks) {
+          const file = fileCacheRef.current.get(task.id);
+          if (file) await processTask(task, file);
+        }
       } finally {
         setBusy(false);
         if (inputRef.current) inputRef.current.value = "";
       }
     },
-    [processLocalTask, updateTask],
+    [processTask, updateTask],
   );
 
   const runTask = useCallback(
     async (id: string) => {
-      const task = readStoredTasks().find((item) => item.id === id);
+      const task = tasks.find((item) => item.id === id);
       const file = fileCacheRef.current.get(id);
       if (!task || !file) {
-        setNotice("历史结果可以直接回看；如需重新处理，请重新选择原 PDF 文件。");
+        setNotice("历史结果可以直接回看；重新处理需要再次选择原 PDF 文件。");
         return;
       }
-      setNotice("任务正在当前浏览器中处理。你可以继续上传其他 PDF。");
-      await processLocalTask(task, file);
+      await processTask(task, file);
     },
-    [processLocalTask],
+    [processTask, tasks],
   );
 
-  useEffect(() => {
-    refreshFromStorage();
-  }, [refreshFromStorage]);
-
-  useEffect(() => {
-    if (!selectedId) return;
-    const stored = readStoredTasks();
-    setDetail(stored.find((task) => task.id === selectedId) ?? null);
-  }, [selectedId, tasks]);
-
-  const completedCount = tasks.filter((task) => task.status === "completed").length;
-  const activeCount = tasks.filter(
-    (task) => task.status === "queued" || task.status === "processing",
+  const activeCount = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)).length;
+  const reviewCount = tasks.filter(
+    (task) => task.outcome === "needs_review",
   ).length;
-  const issueCount = tasks.reduce((total, task) => total + (task.issueCount ?? 0), 0);
+  const issueCount = tasks.reduce(
+    (total, task) => total + (task.issueCount ?? 0),
+    0,
+  );
 
   return (
     <main className="audit-shell">
       <section className="hero">
         <div className="hero-copy">
-          <p className="eyebrow">PDF Audit Workspace</p>
+          <p className="eyebrow">Qwen AI Audit Workspace</p>
           <h1>外网溯源结果报告自动核验台</h1>
           <p className="hero-text">
-            上传 PDF 后系统会在当前浏览器中创建任务，提取报告中的首页字段、结果表格和出处截图线索，
-            再复用现有规则输出核验结论。历史任务会保存在当前浏览器，便于回看。
+            浏览器把 PDF 机械渲染成页面图片，阿里云百炼的 qwen3.7-plus
+            负责视觉识别、字段提取和跨页归并，再由本地确定性规则复核网址、时间和字段一致性。
           </p>
           <div className="hero-actions">
             <button type="button" onClick={() => inputRef.current?.click()}>
               上传 PDF
             </button>
-            <span>支持一次选择多个文件，并行处理；PDF 不会上传到服务器。</span>
+            <span>单文件最多 20 MiB / 80 页，每批最多 6 页。</span>
           </div>
         </div>
         <div className="hero-card" aria-label="任务概览">
@@ -265,12 +336,12 @@ export function AuditConsole() {
             <strong>{activeCount}</strong>
           </div>
           <div>
-            <span>累计问题</span>
-            <strong>{issueCount}</strong>
+            <span>需人工复核</span>
+            <strong>{reviewCount}</strong>
           </div>
           <div>
-            <span>已完成</span>
-            <strong>{completedCount}</strong>
+            <span>累计问题</span>
+            <strong>{issueCount}</strong>
           </div>
         </div>
       </section>
@@ -303,7 +374,8 @@ export function AuditConsole() {
         <div>
           <h2>拖入或选择外网溯源报告</h2>
           <p>
-            文件会直接在浏览器内处理，结果保存到本机历史记录。不会再触发线上上传请求。
+            原始 PDF 留在当前浏览器；渲染后的页面图片会发送到应用服务端和阿里云百炼处理。
+            页面图片不保存，最终结果只存于当前浏览器历史。
           </p>
         </div>
         <button
@@ -322,9 +394,13 @@ export function AuditConsole() {
           <div className="panel-heading">
             <div>
               <p className="eyebrow">History</p>
-              <h2>历史任务</h2>
+              <h2>浏览器历史</h2>
             </div>
-            <button type="button" className="ghost" onClick={() => refreshFromStorage(selectedId)}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setTasks(readStoredTasks())}
+            >
               刷新
             </button>
           </div>
@@ -337,7 +413,7 @@ export function AuditConsole() {
                 <button
                   type="button"
                   key={task.id}
-                  className={`task-row ${task.id === selectedId ? "selected" : ""}`}
+                  className={`task-row ${task.id === selectedTask?.id ? "selected" : ""}`}
                   onClick={() => setSelectedId(task.id)}
                 >
                   <span className={`status-dot ${task.status}`} />
@@ -348,7 +424,9 @@ export function AuditConsole() {
                     </small>
                   </span>
                   <span className="task-meta">
-                    {statusCopy[task.status]}
+                    {task.outcome
+                      ? outcomeCopy[task.outcome]
+                      : statusCopy[task.status]}
                     {task.issueCount !== null ? ` · ${task.issueCount} 项` : ""}
                   </span>
                 </button>
@@ -357,17 +435,17 @@ export function AuditConsole() {
           </div>
         </aside>
 
-        <section className="result-panel" aria-label="查验结果">
+        <section className="result-panel" aria-label="核验结果">
           {!selectedTask ? (
             <div className="empty large">选择一个历史任务查看结果。</div>
           ) : (
             <>
               <div className="result-header">
                 <div>
-                  <p className="eyebrow">Result</p>
+                  <p className="eyebrow">Qwen Result</p>
                   <h2>{selectedTask.fileName}</h2>
                   <p>
-                    状态：{statusCopy[selectedTask.status]} · 最近更新：
+                    {statusCopy[selectedTask.status]} · qwen3.7-plus · 最近更新：
                     {formatTime(selectedTask.updatedAt)}
                   </p>
                 </div>
@@ -375,7 +453,7 @@ export function AuditConsole() {
                   type="button"
                   className="ghost"
                   onClick={() => void runTask(selectedTask.id)}
-                  disabled={selectedTask.status === "processing"}
+                  disabled={ACTIVE_STATUSES.has(selectedTask.status)}
                 >
                   重新处理
                 </button>
@@ -384,24 +462,44 @@ export function AuditConsole() {
               <div className="progress-track" aria-label="处理进度">
                 <span style={{ width: `${selectedTask.progress}%` }} />
               </div>
+              {selectedTask.totalPages ? (
+                <p className="progress-copy">
+                  已处理 {selectedTask.processedPages} / {selectedTask.totalPages} 页
+                </p>
+              ) : null}
 
-              {detail?.summary ? (
+              {selectedTask.outcome ? (
+                <div className={`outcome-banner ${selectedTask.outcome}`}>
+                  <strong>{outcomeCopy[selectedTask.outcome]}</strong>
+                  <span>
+                    {selectedTask.outcome === "needs_review"
+                      ? "识别证据不完整或置信度不足，不能判定为无错误。"
+                      : selectedTask.outcome === "passed"
+                        ? "模型提取完整，确定性规则未发现问题。"
+                        : selectedTask.outcome === "issues_found"
+                          ? "模型提取完整，确定性规则发现下列问题。"
+                          : "本次任务未生成可用结果。"}
+                  </span>
+                </div>
+              ) : null}
+
+              {selectedTask.summary ? (
                 <div className="summary-grid">
                   <div>
                     <span>页数</span>
-                    <strong>{detail.summary.pageCount ?? "—"}</strong>
+                    <strong>{selectedTask.summary.pageCount}</strong>
                   </div>
                   <div>
                     <span>结果表格</span>
-                    <strong>{detail.summary.groupCount}</strong>
+                    <strong>{selectedTask.summary.groupCount}</strong>
                   </div>
                   <div>
                     <span>表格行</span>
-                    <strong>{detail.summary.tableRowCount}</strong>
+                    <strong>{selectedTask.summary.tableRowCount}</strong>
                   </div>
                   <div>
-                    <span>问题数</span>
-                    <strong>{detail.report?.issues.length ?? 0}</strong>
+                    <span>模型置信度</span>
+                    <strong>{Math.round(selectedTask.summary.confidence * 100)}%</strong>
                   </div>
                 </div>
               ) : null}
@@ -410,21 +508,21 @@ export function AuditConsole() {
                 <div className="error-box">{selectedTask.errorMessage}</div>
               ) : null}
 
-              {detail?.summary?.warnings.length ? (
+              {selectedTask.summary?.warnings.length ? (
                 <div className="warning-box">
-                  <h3>识别提示</h3>
+                  <h3>人工复核提示</h3>
                   <ul>
-                    {detail.summary.warnings.map((warning) => (
-                      <li key={warning}>{warning}</li>
+                    {selectedTask.summary.warnings.map((warning, index) => (
+                      <li key={`${index}-${warning}`}>{warning}</li>
                     ))}
                   </ul>
                 </div>
               ) : null}
 
-              {detail?.report?.issues.length ? (
+              {selectedTask.report?.issues.length ? (
                 <div className="issues">
                   <h3>问题列表</h3>
-                  {detail.report.issues.map((issue, index) => (
+                  {selectedTask.report.issues.map((issue, index) => (
                     <article key={`${issue.code}-${index}`}>
                       <span>{index + 1}</span>
                       <div>
@@ -434,16 +532,16 @@ export function AuditConsole() {
                     </article>
                   ))}
                 </div>
-              ) : detail?.status === "completed" ? (
-                <div className="success-box">经核查，当前 PDF 未发现规则错误。</div>
+              ) : selectedTask.outcome === "passed" ? (
+                <div className="success-box">经核查，当前 PDF 未发现规则问题。</div>
               ) : null}
 
               <div className="report-block">
                 <h3>完整中文报告</h3>
                 <pre>
-                  {detail?.reportText ??
-                    (selectedTask.status === "processing"
-                      ? "任务处理中，请稍候..."
+                  {selectedTask.reportText ??
+                    (ACTIVE_STATUSES.has(selectedTask.status)
+                      ? "qwen3.7-plus 正在处理，请稍候..."
                       : "暂无报告。")}
                 </pre>
               </div>

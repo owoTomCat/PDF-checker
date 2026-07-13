@@ -257,6 +257,15 @@ h3 {
 .ghost {
   background: rgba(23, 107, 77, 0.09);
   color: var(--accent-strong);
+  white-space: nowrap;
+}
+
+.result-header > div {
+  min-width: 0;
+}
+
+.result-header h2 {
+  overflow-wrap: anywhere;
 }
 
 .ghost:disabled,
@@ -300,7 +309,9 @@ h3 {
   background: #9aa4a0;
 }
 
-.status-dot.processing {
+.status-dot.rendering,
+.status-dot.extracting,
+.status-dot.finalizing {
   background: #d99022;
 }
 
@@ -342,6 +353,45 @@ h3 {
   display: block;
   height: 100%;
   transition: width 0.3s ease;
+}
+
+.progress-copy {
+  color: var(--muted);
+  font-size: 13px;
+  margin: -8px 0 18px;
+}
+
+.outcome-banner {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 18px;
+  padding: 16px 18px;
+}
+
+.outcome-banner span {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: right;
+}
+
+.outcome-banner.passed {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.outcome-banner.issues_found,
+.outcome-banner.failed {
+  background: #fff0ee;
+  color: var(--danger);
+}
+
+.outcome-banner.needs_review {
+  background: #fff4d8;
+  color: var(--warning);
 }
 
 .summary-grid {
@@ -481,5 +531,14 @@ h3 {
 
   .task-meta {
     grid-column: 2;
+  }
+
+  .outcome-banner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .outcome-banner span {
+    text-align: left;
   }
 }
