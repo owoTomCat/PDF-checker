@@ -117,6 +117,60 @@ export const FinalModelOutputSchema = z.strictObject({
   warnings,
 });
 
+export const PdfAuditInputSchema = z.strictObject({
+  firstPageTable: FirstPageTableSchema,
+  certificate: CertificateSchema.nullable(),
+  groups: z.array(RightImageGroupSchema).max(MAX_PDF_PAGES),
+});
+
+export const AuditIssueSchema = z.strictObject({
+  code: z.string().min(1).max(100),
+  scope: z.enum(["CERTIFICATE", "RESULT", "CHRONOLOGY", "STRUCTURE"]),
+  groupLabel: nullableShortText,
+  resultId: nullableShortText,
+  message: z.string().min(1).max(2_000),
+});
+
+export const AuditReportSchema = z.strictObject({
+  certificateIssues: z.array(AuditIssueSchema).max(1_000),
+  resultIssues: z.array(AuditIssueSchema).max(5_000),
+  issues: z.array(AuditIssueSchema).max(6_000),
+});
+
+export const ExtractionSummarySchema = z.strictObject({
+  parserMode: z.string().min(1).max(200),
+  pageCount: z.number().int().min(1).max(MAX_PDF_PAGES),
+  firstPageFields: z.number().int().min(0).max(4),
+  groupCount: z.number().int().min(0).max(MAX_PDF_PAGES),
+  tableRowCount: z.number().int().min(0).max(40_000),
+  screenshotHeadingCount: z.number().int().min(0).max(40_000),
+  warnings,
+  confidence,
+  extractionComplete: z.boolean(),
+});
+
+export const AuditOutcomeSchema = z.enum([
+  "passed",
+  "issues_found",
+  "needs_review",
+  "failed",
+]);
+
+export const ExtractApiResponseSchema = z.strictObject({
+  model: z.literal("qwen3.7-plus"),
+  pages: z.array(PageExtractionSchema).min(1).max(MAX_BATCH_PAGES),
+  warnings,
+});
+
+export const FinalAuditResponseSchema = z.strictObject({
+  model: z.literal("qwen3.7-plus"),
+  outcome: AuditOutcomeSchema,
+  input: PdfAuditInputSchema,
+  report: AuditReportSchema,
+  reportText: z.string().max(1_000_000),
+  summary: ExtractionSummarySchema,
+});
+
 export const ExtractRequestMetadataSchema = z.strictObject({
   fileName: z.string().min(1).max(255),
   pageNumbers: z.array(pageNumber).min(1).max(MAX_BATCH_PAGES),
@@ -129,18 +183,15 @@ export const FinalizeRequestSchema = z.strictObject({
   pages: z.array(PageExtractionSchema).min(1).max(MAX_PDF_PAGES),
 });
 
-export type AuditOutcome =
-  | "passed"
-  | "issues_found"
-  | "needs_review"
-  | "failed";
+export type AuditOutcome = z.infer<typeof AuditOutcomeSchema>;
 export type BatchExtraction = z.infer<typeof BatchExtractionSchema>;
 export type PageExtraction = z.infer<typeof PageExtractionSchema>;
 export type FinalModelOutput = z.infer<typeof FinalModelOutputSchema>;
-export type PdfAuditInput = Pick<
-  FinalModelOutput,
-  "firstPageTable" | "certificate" | "groups"
->;
+export type PdfAuditInput = z.infer<typeof PdfAuditInputSchema>;
+export type AuditIssue = z.infer<typeof AuditIssueSchema>;
+export type AuditReport = z.infer<typeof AuditReportSchema>;
+export type ExtractionSummary = z.infer<typeof ExtractionSummarySchema>;
+export type FinalAuditResponse = z.infer<typeof FinalAuditResponseSchema>;
 
 function isBlank(value: string | null) {
   return value === null || value.trim().length === 0;
