@@ -531,8 +531,9 @@ export function validatePdfAudit(input) {
 /**
  * 输出用户约定的中文格式。
  * @param {ReturnType<typeof validatePdfAudit>} report
+ * @param {{needsReview?: boolean, warnings?: string[]}} [options]
  */
-export function formatPdfAuditReport(report) {
+export function formatPdfAuditReport(report, options = {}) {
   const { input, certificateIssues, issues } = report;
   const lines = ["{", "【权利人名称、作品类型 - 识别结果】"];
   const certificate = input.certificate;
@@ -568,7 +569,15 @@ export function formatPdfAuditReport(report) {
   }
 
   lines.push("", "【评估结果】：");
-  if (issues.length === 0) {
+  if (options.needsReview) {
+    lines.push("识别结果不完整，需人工复核，当前不能判定为无错误。");
+    for (const warning of options.warnings ?? []) {
+      lines.push(`复核提示：${text(warning)}`);
+    }
+    issues.forEach((issue, index) => {
+      lines.push(`错误${index + 1} ：${issue.message}`);
+    });
+  } else if (issues.length === 0) {
     lines.push("经核查，pdf中无错误");
   } else {
     issues.forEach((issue, index) => {

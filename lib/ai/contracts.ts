@@ -4,6 +4,7 @@ export const MAX_PDF_BYTES = 20 * 1024 * 1024;
 export const MAX_PDF_PAGES = 80;
 export const MAX_BATCH_PAGES = 6;
 export const MAX_PAGE_IMAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_BATCH_IMAGE_BYTES = 24 * 1024 * 1024;
 export const MIN_COMPLETE_CONFIDENCE = 0.8;
 
 const shortText = z.string().max(500);
