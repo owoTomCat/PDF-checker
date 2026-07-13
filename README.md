@@ -1,6 +1,8 @@
-# vinext-starter
+# PDF-checker
 
-A clean full-stack starter running on
+使用 AI 能力快速核查与纠正 PDF 中的图片信息。
+
+A full-stack PDF audit workspace running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
 Drizzle support.
 
