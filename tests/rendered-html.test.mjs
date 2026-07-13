@@ -6,11 +6,12 @@ const templateRoot = new URL("../", import.meta.url);
 const previewRoot = new URL("../app/_sites-preview/", import.meta.url);
 
 test("defines the Qwen PDF audit workspace UI and metadata", async () => {
-  const [page, layout, consoleSource, pipelineSource] = await Promise.all([
+  const [page, layout, consoleSource, pipelineSource, rendererSource] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/AuditConsole.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/client/audit-pipeline.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/client/pdf-renderer.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(layout, /title:\s*"PDF 外网溯源报告核验"/);
@@ -25,6 +26,7 @@ test("defines the Qwen PDF audit workspace UI and metadata", async () => {
   assert.match(consoleSource, /需人工复核/);
   assert.match(pipelineSource, /\/api\/audit\/extract/);
   assert.match(pipelineSource, /\/api\/audit\/finalize/);
+  assert.doesNotMatch(rendererSource, /getTextContent/);
   assert.doesNotMatch(consoleSource, /runAuditFromPdf/);
   assert.doesNotMatch(consoleSource, /PDF 不会上传到服务器/);
   assert.doesNotMatch(consoleSource, /\/api\/tasks/);
@@ -38,4 +40,19 @@ test("removes the disposable starter preview", async () => {
   await assert.rejects(
     access(new URL("public/_sites-preview", templateRoot)),
   );
+});
+
+test("removes the legacy local parser and D1/R2 task routes", async () => {
+  const legacyPaths = [
+    "../lib/pdf-text-extractor.ts",
+    "../lib/audit-runner.ts",
+    "../lib/server/storage.ts",
+    "../app/api/tasks/route.ts",
+    "../app/api/tasks/[id]/route.ts",
+    "../app/api/tasks/[id]/run/route.ts",
+  ];
+
+  for (const path of legacyPaths) {
+    await assert.rejects(access(new URL(path, import.meta.url)));
+  }
 });
