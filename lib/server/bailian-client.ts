@@ -222,9 +222,8 @@ export function createBailianClient(options: BailianClientOptions) {
   ): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
     try {
-      response = await fetchImpl(`${baseUrl}/chat/completions`, {
+      const response = await fetchImpl(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${options.apiKey}`,
@@ -233,7 +232,29 @@ export function createBailianClient(options: BailianClientOptions) {
         body: JSON.stringify(request),
         signal: controller.signal,
       });
-    } catch {
+
+      if (!response.ok) {
+        throw new BailianClientError(
+          "UPSTREAM_ERROR",
+          "模型服务暂时不可用，请稍后重试。",
+        );
+      }
+
+      const rawEnvelope = await response.text();
+      if (
+        new TextEncoder().encode(rawEnvelope).byteLength >
+        MAX_UPSTREAM_RESPONSE_BYTES
+      ) {
+        throw new BailianClientError(
+          "INVALID_MODEL_OUTPUT",
+          "模型返回的数据超过安全限制。",
+        );
+      }
+      return parseModelContent(rawEnvelope, schema);
+    } catch (error) {
+      if (error instanceof BailianClientError) {
+        throw error;
+      }
       if (controller.signal.aborted) {
         throw new BailianClientError(
           "UPSTREAM_TIMEOUT",
@@ -247,22 +268,6 @@ export function createBailianClient(options: BailianClientOptions) {
     } finally {
       clearTimeout(timeout);
     }
-
-    if (!response.ok) {
-      throw new BailianClientError(
-        "UPSTREAM_ERROR",
-        "模型服务暂时不可用，请稍后重试。",
-      );
-    }
-
-    const rawEnvelope = await response.text();
-    if (new TextEncoder().encode(rawEnvelope).byteLength > MAX_UPSTREAM_RESPONSE_BYTES) {
-      throw new BailianClientError(
-        "INVALID_MODEL_OUTPUT",
-        "模型返回的数据超过安全限制。",
-      );
-    }
-    return parseModelContent(rawEnvelope, schema);
   }
 
   return {

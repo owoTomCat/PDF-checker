@@ -44,6 +44,18 @@ export function assertModelRequestAllowed(
   }
 }
 
-export function modelRequestGuardOptionsFromEnv(): RequestGuardOptions {
-  return { requireAuth: process.env.PDF_AUDIT_REQUIRE_AUTH === "true" };
+type RequestGuardEnv = {
+  PDF_AUDIT_REQUIRE_AUTH?: string;
+  NODE_ENV?: string;
+};
+
+export function modelRequestGuardOptionsFromEnv(
+  env: RequestGuardEnv = process.env,
+): RequestGuardOptions {
+  const configured = env.PDF_AUDIT_REQUIRE_AUTH;
+  return {
+    requireAuth:
+      configured === "true" ||
+      (configured === undefined && env.NODE_ENV === "production"),
+  };
 }

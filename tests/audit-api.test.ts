@@ -179,3 +179,39 @@ test("API maps malformed model output to a stable generic error", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("extract API rejects an oversized declared body before parsing multipart", async () => {
+  const response = await extractPages(
+    new Request("https://audit.example.com/api/audit/extract", {
+      method: "POST",
+      headers: {
+        origin: "https://audit.example.com",
+        "content-length": String(27 * 1024 * 1024),
+        "content-type": "text/plain",
+      },
+      body: "oversized-body-placeholder",
+    }),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 413);
+  assert.equal(body.error.code, "BATCH_TOO_LARGE");
+});
+
+test("finalize API rejects an oversized declared body before parsing JSON", async () => {
+  const response = await finalizeAudit(
+    new Request("https://audit.example.com/api/audit/finalize", {
+      method: "POST",
+      headers: {
+        origin: "https://audit.example.com",
+        "content-length": String(3 * 1024 * 1024),
+        "content-type": "text/plain",
+      },
+      body: "oversized-body-placeholder",
+    }),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 413);
+  assert.equal(body.error.code, "BODY_TOO_LARGE");
+});

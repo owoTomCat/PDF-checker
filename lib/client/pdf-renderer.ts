@@ -57,7 +57,7 @@ export async function openPdfForRendering(
         await page.render({ canvas, viewport }).promise;
         const blob = await canvasToJpeg(canvas);
         if (blob.size > MAX_PAGE_IMAGE_BYTES) {
-          throw new Error("渲染后的单页图片超过 8 MiB 限制。");
+          throw new Error("渲染后的单页图片超过 7 MiB 限制。");
         }
         return blob;
       } finally {

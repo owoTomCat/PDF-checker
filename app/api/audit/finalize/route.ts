@@ -48,6 +48,16 @@ function errorResponse(error: unknown) {
 export async function POST(request: Request) {
   try {
     assertModelRequestAllowed(request, modelRequestGuardOptionsFromEnv());
+    const declaredBodyBytes = Number(request.headers.get("content-length"));
+    if (
+      Number.isFinite(declaredBodyBytes) &&
+      declaredBodyBytes > MAX_FINALIZE_BODY_BYTES
+    ) {
+      return NextResponse.json(
+        { error: { code: "BODY_TOO_LARGE", message: "汇总数据超过 2 MiB 限制。" } },
+        { status: 413 },
+      );
+    }
     const rawBody = await request.text();
     if (new TextEncoder().encode(rawBody).byteLength > MAX_FINALIZE_BODY_BYTES) {
       return NextResponse.json(

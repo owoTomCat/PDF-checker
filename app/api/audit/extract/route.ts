@@ -16,6 +16,8 @@ import {
 
 export const runtime = "edge";
 
+const MAX_EXTRACT_BODY_BYTES = MAX_BATCH_IMAGE_BYTES + 2 * 1024 * 1024;
+
 class RouteInputError extends Error {
   constructor(
     public readonly code: string,
@@ -73,7 +75,7 @@ async function pageFileToDataUrl(file: File) {
     throw new RouteInputError(
       "IMAGE_TOO_LARGE",
       413,
-      "单页图片为空或超过 8 MiB 限制。",
+      "单页图片为空或超过 7 MiB 限制。",
     );
   }
   if (file.type !== "image/jpeg" && file.type !== "image/png") {
@@ -102,6 +104,17 @@ async function pageFileToDataUrl(file: File) {
 export async function POST(request: Request) {
   try {
     assertModelRequestAllowed(request, modelRequestGuardOptionsFromEnv());
+    const declaredBodyBytes = Number(request.headers.get("content-length"));
+    if (
+      Number.isFinite(declaredBodyBytes) &&
+      declaredBodyBytes > MAX_EXTRACT_BODY_BYTES
+    ) {
+      throw new RouteInputError(
+        "BATCH_TOO_LARGE",
+        413,
+        "上传数据超过 26 MiB 限制。",
+      );
+    }
     const form = await request.formData();
     const files = form.getAll("pages");
     if (files.some((value) => !(value instanceof File))) {

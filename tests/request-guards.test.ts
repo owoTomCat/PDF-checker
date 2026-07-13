@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   RequestGuardError,
   assertModelRequestAllowed,
+  modelRequestGuardOptionsFromEnv,
 } from "../lib/server/request-guards";
 
 test("accepts a same-origin request when authentication is not required", () => {
@@ -77,5 +78,19 @@ test("treats Sec-Fetch-Site cross-site as untrusted even without Origin", () => 
       assert.equal((error as RequestGuardError).code, "CROSS_ORIGIN");
       return true;
     },
+  );
+});
+
+test("requires authentication by default in production", () => {
+  assert.deepEqual(
+    modelRequestGuardOptionsFromEnv({ NODE_ENV: "production" }),
+    { requireAuth: true },
+  );
+  assert.deepEqual(
+    modelRequestGuardOptionsFromEnv({
+      NODE_ENV: "production",
+      PDF_AUDIT_REQUIRE_AUTH: "false",
+    }),
+    { requireAuth: false },
   );
 });

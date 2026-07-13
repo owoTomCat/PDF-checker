@@ -195,3 +195,38 @@ test("rejects malformed model JSON and unsafe base URLs", async () => {
     },
   );
 });
+
+test(
+  "keeps the timeout active while reading the upstream response body",
+  { timeout: 500 },
+  async () => {
+    const client = createBailianClient({
+      apiKey: "test-secret",
+      baseUrl:
+        "https://ws-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      timeoutMs: 20,
+      fetchImpl: async (_url, init) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              init?.signal?.addEventListener("abort", () => {
+                controller.error(new DOMException("aborted", "AbortError"));
+              });
+            },
+          }),
+        ),
+    });
+
+    await assert.rejects(
+      client.extractPages({
+        fileName: "example.pdf",
+        totalPages: 1,
+        pages: [{ pageNumber: 1, dataUrl: "data:image/jpeg;base64,/9j/AA==" }],
+      }),
+      (error: unknown) => {
+        assert.equal((error as BailianClientError).code, "UPSTREAM_TIMEOUT");
+        return true;
+      },
+    );
+  },
+);
