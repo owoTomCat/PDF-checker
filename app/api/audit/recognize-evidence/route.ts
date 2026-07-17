@@ -58,6 +58,13 @@ export async function POST(request: Request) {
       })),
     });
 
+    const normalizedOutput = {
+      ...output,
+      screenshots: output.screenshots.map((item) => ({
+        ...item,
+        screenshotId: item.regionId,
+      })),
+    };
     const certificateIds = new Set(
       metadata.regions
         .filter((region) => region.type === "certificate")
@@ -69,10 +76,10 @@ export async function POST(request: Request) {
         .map((region) => [region.regionId, region]),
     );
     const returnedCertificateIds = new Set(
-      output.certificates.map((item) => item.regionId),
+      normalizedOutput.certificates.map((item) => item.regionId),
     );
     const returnedScreenshotIds = new Set(
-      output.screenshots.map((item) => item.regionId),
+      normalizedOutput.screenshots.map((item) => item.regionId),
     );
     const invalidOutput =
       returnedCertificateIds.size !== certificateIds.size ||
@@ -81,7 +88,7 @@ export async function POST(request: Request) {
       [...screenshotMetadata.keys()].some(
         (id) => !returnedScreenshotIds.has(id),
       ) ||
-      output.screenshots.some((item) => {
+      normalizedOutput.screenshots.some((item) => {
         const source = screenshotMetadata.get(item.regionId);
         return (
           !source ||
@@ -100,7 +107,10 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json(
-      EvidenceApiResponseSchema.parse({ model: "qwen3.7-plus", ...output }),
+      EvidenceApiResponseSchema.parse({
+        model: "qwen3.7-plus",
+        ...normalizedOutput,
+      }),
     );
   } catch (error) {
     return modelRouteErrorResponse(error, "证书和截图识别失败，请稍后重试。");

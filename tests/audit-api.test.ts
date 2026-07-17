@@ -233,6 +233,53 @@ test("evidence API accepts a screenshot when layout found no address bar", async
   }
 });
 
+test("evidence API derives the redundant screenshot ID from the verified region ID", async () => {
+  const originalFetch = globalThis.fetch;
+  const regionId = "page-3-screenshot-1";
+  const evidenceWithExampleScreenshotId = {
+    ...strictEvidence,
+    certificates: [],
+    screenshots: strictEvidence.screenshots.map((screenshot) => ({
+      ...screenshot,
+      screenshotId: "screenshot-1",
+      regionId,
+      pageNumber: 3,
+      addressBarRegionId: "page-3-address-bar-1",
+    })),
+  };
+  globalThis.fetch = async () => modelResponse(evidenceWithExampleScreenshotId);
+
+  try {
+    const response = await recognizeEvidence(
+      multipartRequest(
+        "/api/audit/recognize-evidence",
+        {
+          fileName: "example.pdf",
+          totalPages: 4,
+          regions: [
+            {
+              regionId,
+              type: "rights_screenshot",
+              pageNumber: 3,
+              rightsImageIndex: 1,
+              resultIndex: 1,
+              addressBarRegionId: "page-3-address-bar-1",
+              readingOrder: 1,
+            },
+          ],
+        },
+        [jpeg()],
+      ),
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.screenshots[0].screenshotId, regionId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("all isolated image APIs return their validated stage output", async () => {
   const originalFetch = globalThis.fetch;
   const outputs = [
@@ -388,6 +435,62 @@ test("association API returns validated ID-only mappings", async () => {
     assert.equal(response.status, 200);
     assert.equal(body.associations[0].tableRowId, "table-row-1");
     assert.equal("url" in body.associations[0], false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("association API matches unique indices across different pages", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    modelResponse({
+      associations: [
+        {
+          screenshotId: "page-3-screenshot-1",
+          tableRowId: null,
+          confidence: 0.4,
+          reason: "截图和表格行页码不一致",
+        },
+      ],
+      warnings: ["截图在第 3 页，表格行在第 2 页，无法关联。"],
+    });
+
+  try {
+    const response = await associateRows(
+      new Request("https://audit.example.com/api/audit/associate", {
+        method: "POST",
+        headers: {
+          origin: "https://audit.example.com",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          screenshots: [
+            {
+              id: "page-3-screenshot-1",
+              pageNumber: 3,
+              rightsImageIndex: 1,
+              resultIndex: 1,
+              readingOrder: 1,
+            },
+          ],
+          tableRows: [
+            {
+              id: "table-row-1",
+              pageNumber: 2,
+              rightsImageIndex: 1,
+              resultIndex: 1,
+              readingOrder: 1,
+            },
+          ],
+        }),
+      }),
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.associations[0].tableRowId, "table-row-1");
+    assert.equal(body.associations[0].confidence, 1);
+    assert.deepEqual(body.warnings, []);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -106,3 +106,52 @@ Upload `D:\Code\PPT\本地测试案例\7.17\（2026）苏0281民初7549号-3-外
 
 Confirm API requests complete without unhandled server errors and browser console contains no application errors.
 
+### Task 5: Normalize evidence bookkeeping IDs
+
+**Files:**
+- Modify: `app/api/audit/recognize-evidence/route.ts`
+- Modify: `lib/ai/prompts.ts`
+- Test: `tests/audit-api.test.ts`
+- Test: `tests/bailian-client.test.ts`
+
+**Interfaces:**
+- Consumes: validated evidence `regionId` values returned for requested regions.
+- Produces: `screenshotId` values deterministically equal to their verified `regionId`.
+
+- [ ] **Step 1: Add a failing API test for a model-provided example screenshot ID**
+
+Return `screenshotId: "screenshot-1"` with a valid `regionId: "page-3-screenshot-1"`, then require HTTP 200 and the page-scoped ID in the response.
+
+- [ ] **Step 2: Normalize the redundant ID and clarify the prompt**
+
+Set each response `screenshotId` from its validated `regionId`; require the evidence model to copy all `REGION_META` identifiers instead of the JSON example.
+
+- [ ] **Step 3: Run focused and full verification**
+
+Run the two regression tests, `npm run typecheck`, and `npm test`.
+
+Expected: the regression tests pass and the full suite stays green.
+
+### Task 6: Make cross-page association deterministic
+
+**Files:**
+- Modify: `app/api/audit/associate/route.ts`
+- Modify: `lib/ai/prompts.ts`
+- Test: `tests/audit-api.test.ts`
+- Test: `tests/bailian-client.test.ts`
+
+**Interfaces:**
+- Consumes: screenshot and table-row locators containing `rightsImageIndex` and `resultIndex`.
+- Produces: a one-to-one mapping when the locator pair is unique on both sides, regardless of physical page number.
+
+- [ ] **Step 1: Add a failing cross-page association test**
+
+Provide a page-3 screenshot and page-2 table row with the same `(1, 1)` locator while the mocked model returns `null`; require the API to return `table-row-1` at confidence 1 with no warning.
+
+- [ ] **Step 2: Implement unique-key association and prompt rules**
+
+Use `(rightsImageIndex, resultIndex)` as the deterministic key. Map only when unique on both sides; otherwise return `null` and a stable warning. State explicitly that different pages do not conflict.
+
+- [ ] **Step 3: Re-run the real PDF**
+
+Expected: every API stage returns HTTP 200, no cross-page warning remains, and the final report contains the actual deterministic comparison result.

@@ -48,10 +48,55 @@ export async function POST(request: Request) {
       );
     }
 
+    const locatorKey = (item: {
+      rightsImageIndex: number;
+      resultIndex: number;
+    }) => `${item.rightsImageIndex}:${item.resultIndex}`;
+    const screenshotCounts = new Map<string, number>();
+    const tableRowsByKey = new Map<string, typeof input.tableRows>();
+    for (const screenshot of input.screenshots) {
+      const key = locatorKey(screenshot);
+      screenshotCounts.set(key, (screenshotCounts.get(key) ?? 0) + 1);
+    }
+    for (const tableRow of input.tableRows) {
+      const key = locatorKey(tableRow);
+      const rows = tableRowsByKey.get(key) ?? [];
+      rows.push(tableRow);
+      tableRowsByKey.set(key, rows);
+    }
+    const associations = input.screenshots.map((screenshot) => {
+      const key = locatorKey(screenshot);
+      const tableRows = tableRowsByKey.get(key) ?? [];
+      if (screenshotCounts.get(key) === 1 && tableRows.length === 1) {
+        return {
+          screenshotId: screenshot.id,
+          tableRowId: tableRows[0].id,
+          confidence: 1,
+          reason: "权利图序号和结果序号唯一一致。",
+        };
+      }
+
+      return {
+        screenshotId: screenshot.id,
+        tableRowId: null,
+        confidence: 0,
+        reason:
+          tableRows.length === 0
+            ? "未找到权利图序号和结果序号一致的汇总表行。"
+            : "相同权利图序号和结果序号存在重复项，无法唯一关联。",
+      };
+    });
+    const normalizedOutput = {
+      associations,
+      warnings: associations
+        .filter((association) => association.tableRowId === null)
+        .map((association) => association.reason),
+    };
+
     return NextResponse.json(
       AssociationApiResponseSchema.parse({
         model: "qwen3.7-plus",
-        ...output,
+        ...normalizedOutput,
       }),
     );
   } catch (error) {

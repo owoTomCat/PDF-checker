@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LAYOUT_SYSTEM_PROMPT } from "../lib/ai/prompts";
+import {
+  ASSOCIATION_SYSTEM_PROMPT,
+  EVIDENCE_SYSTEM_PROMPT,
+  LAYOUT_SYSTEM_PROMPT,
+} from "../lib/ai/prompts";
 import {
   BailianClientError,
   buildAssociationRequest,
@@ -133,6 +137,14 @@ test("builds five isolated qwen3.7-plus JSON requests", () => {
   assert.match(
     LAYOUT_SYSTEM_PROMPT,
     /案件基本信息表[\s\S]+不属于 summary_table/,
+  );
+  assert.match(
+    EVIDENCE_SYSTEM_PROMPT,
+    /screenshotId 必须与 regionId 完全相同/,
+  );
+  assert.match(
+    ASSOCIATION_SYSTEM_PROMPT,
+    /页码不同不构成冲突/,
   );
   assert.doesNotMatch(JSON.stringify(evidence.messages[1]), /tableRowId/);
   assert.doesNotMatch(JSON.stringify(table.messages[1]), /screenshotId/);
