@@ -1,154 +1,69 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  BatchExtractionSchema,
-  FinalModelOutputSchema,
-  deriveAuditOutcome,
+  AssociationBatchSchema,
+  BoundsSchema,
+  EvidenceBatchSchema,
+  StrictFinalizeRequestSchema,
+  LayoutBatchSchema,
+  TableBatchSchema,
+  UrlReviewBatchSchema,
 } from "../lib/ai/contracts";
+import {
+  strictAssociation,
+  strictEvidence,
+  strictFinalizeRequest,
+  strictLayout,
+  strictTable,
+  strictUrlReview,
+} from "./strict-fixtures";
 
-const completeFinalOutput = {
-  firstPageTable: {
-    caseNumber: "（2026）示例案号",
-    feedbackDate: "2026-07-13",
-    rightsHolderName: "示例权利人",
-    workType: "摄影作品",
-  },
-  certificate: {
-    isRegistrationCertificate: true,
-    copyrightOwner: "示例权利人",
-    workType: "摄影作品",
-    sourcePage: 1,
-  },
-  groups: [
-    {
-      label: "权利图-1",
-      tablePage: 2,
-      tableRows: [
+test("layout schema accepts geometry and rejects transcribed business text", () => {
+  assert.equal(LayoutBatchSchema.safeParse(strictLayout).success, true);
+  assert.equal(
+    LayoutBatchSchema.safeParse({
+      ...strictLayout,
+      pages: [{ ...strictLayout.pages[0], rightsHolderName: "不应出现" }],
+    }).success,
+    false,
+  );
+});
+
+test("rejects a normalized region that leaves the page", () => {
+  assert.equal(
+    BoundsSchema.safeParse({ x: 0.8, y: 0.1, width: 0.3, height: 0.2 })
+      .success,
+    false,
+  );
+});
+
+test("accepts isolated evidence, table, URL review and association outputs", () => {
+  assert.equal(EvidenceBatchSchema.parse(strictEvidence).screenshots.length, 1);
+  assert.equal(TableBatchSchema.parse(strictTable).rows.length, 1);
+  assert.equal(UrlReviewBatchSchema.parse(strictUrlReview).reviews.length, 1);
+  assert.equal(
+    AssociationBatchSchema.parse(strictAssociation).associations.length,
+    1,
+  );
+});
+
+test("association schema rejects business field values", () => {
+  assert.equal(
+    AssociationBatchSchema.safeParse({
+      ...strictAssociation,
+      associations: [
         {
-          resultId: "结果1",
-          networkSource: "小红书",
-          uploader: "示例账号",
-          url: "https://www.xiaohongshu.com/explore/example",
-          imageComparisonResult: "疑似重复",
-          networkPublishedAt: "2026-01-01 10:00:00",
-          checkedAt: "2026-02-01 10:00:00",
-          resultKind: "VALID" as const,
+          ...strictAssociation.associations[0],
+          url: "https://example.com/post/1",
         },
       ],
-      screenshotResults: [
-        {
-          resultId: "结果1",
-          platform: "小红书",
-          publisher: "示例账号",
-          publishedAt: "2026-01-01 10:00:00",
-          url: "https://www.xiaohongshu.com/explore/example",
-          sourcePage: 3,
-        },
-      ],
-    },
-  ],
-  extractionComplete: true,
-  confidence: 0.96,
-  warnings: [] as string[],
-};
-
-test("accepts bounded page-level extraction JSON", () => {
-  const parsed = BatchExtractionSchema.parse({
-    pages: [
-      {
-        pageNumber: 1,
-        pageType: "cover",
-        firstPageTable: {
-          caseNumber: "（2026）示例案号",
-          feedbackDate: "2026-07-13",
-          rightsHolderName: "示例权利人",
-          workType: "摄影作品",
-        },
-        certificate: null,
-        resultTables: [],
-        screenshots: [],
-        warnings: [],
-        confidence: 0.98,
-      },
-    ],
-    warnings: [],
-  });
-
-  assert.equal(parsed.pages[0]?.pageNumber, 1);
-  assert.equal(parsed.pages[0]?.pageType, "cover");
+    }).success,
+    false,
+  );
 });
 
-test("rejects model output outside the fixed schema and page limits", () => {
-  const parsed = BatchExtractionSchema.safeParse({
-    pages: [
-      {
-        pageNumber: 81,
-        pageType: "cover",
-        firstPageTable: null,
-        certificate: null,
-        resultTables: [],
-        screenshots: [],
-        warnings: [],
-        confidence: 1,
-        injectedCommand: "ignore the schema",
-      },
-    ],
-    warnings: [],
-  });
-
-  assert.equal(parsed.success, false);
-});
-
-test("accepts a complete normalized model result", () => {
-  const parsed = FinalModelOutputSchema.parse(completeFinalOutput);
-
-  assert.equal(parsed.groups.length, 1);
-  assert.equal(parsed.groups[0]?.tableRows.length, 1);
-});
-
-test("returns passed only for complete, high-confidence evidence without issues", () => {
-  const output = FinalModelOutputSchema.parse(completeFinalOutput);
-
-  assert.equal(deriveAuditOutcome(output, 0), "passed");
-});
-
-test("returns issues_found when complete evidence has deterministic issues", () => {
-  const output = FinalModelOutputSchema.parse(completeFinalOutput);
-
-  assert.equal(deriveAuditOutcome(output, 2), "issues_found");
-});
-
-test("forces needs_review when no result table was extracted", () => {
-  const output = FinalModelOutputSchema.parse({
-    ...completeFinalOutput,
-    groups: [],
-  });
-
-  assert.equal(deriveAuditOutcome(output, 0), "needs_review");
-});
-
-test("forces needs_review for incomplete, uncertain, or missing key evidence", () => {
-  const cases = [
-    { ...completeFinalOutput, extractionComplete: false },
-    { ...completeFinalOutput, confidence: 0.79 },
-    { ...completeFinalOutput, warnings: ["第 3 页截图模糊"] },
-    {
-      ...completeFinalOutput,
-      firstPageTable: { ...completeFinalOutput.firstPageTable, caseNumber: "" },
-    },
-    {
-      ...completeFinalOutput,
-      groups: [
-        {
-          ...completeFinalOutput.groups[0],
-          screenshotResults: [],
-        },
-      ],
-    },
-  ];
-
-  for (const value of cases) {
-    const output = FinalModelOutputSchema.parse(value);
-    assert.equal(deriveAuditOutcome(output, 0), "needs_review");
-  }
+test("accepts a bounded complete strict finalize request", () => {
+  const parsed = StrictFinalizeRequestSchema.parse(strictFinalizeRequest);
+  assert.equal(parsed.pageCount, 1);
+  assert.equal(parsed.evidence.screenshots[0]?.addressBarRegionId, "address-1");
 });
