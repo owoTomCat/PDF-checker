@@ -83,3 +83,14 @@ test("removes the legacy local parser and D1/R2 task routes", async () => {
     await assert.rejects(access(new URL(path, import.meta.url)));
   }
 });
+
+test("uses a cross-platform vinext launcher", async () => {
+  const packageJson = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  );
+
+  assert.equal(packageJson.scripts.dev, "node scripts/run-vinext.mjs dev");
+  assert.equal(packageJson.scripts.build, "node scripts/run-vinext.mjs build");
+  assert.equal(packageJson.scripts.start, "node scripts/run-vinext.mjs start");
+  assert.doesNotMatch(JSON.stringify(packageJson.scripts), /WRANGLER_LOG_PATH=/);
+});
