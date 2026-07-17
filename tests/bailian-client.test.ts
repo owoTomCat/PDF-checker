@@ -2,11 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BailianClientError,
+  buildAssociationRequest,
+  buildEvidenceRequest,
   buildFinalizationRequest,
+  buildLayoutRequest,
   buildPageExtractionRequest,
+  buildTableRequest,
+  buildUrlReviewRequest,
   createBailianClient,
 } from "../lib/server/bailian-client";
 import { PAGE_EXTRACTION_SYSTEM_PROMPT } from "../lib/ai/prompts";
+import {
+  strictAssociation,
+  strictEvidence,
+  strictLayout,
+  strictTable,
+  strictUrlReview,
+} from "./strict-fixtures";
 
 const samplePageOutput = {
   pages: [
@@ -42,6 +54,86 @@ const sampleFinalOutput = {
   confidence: 0.7,
   warnings: ["未识别到结果表格"],
 };
+
+const pageDataUrl = "data:image/jpeg;base64,/9j/AA==";
+const cropDataUrl = "data:image/png;base64,iVBORw0KGgo=";
+
+const layoutInput = {
+  fileName: "example.pdf",
+  totalPages: 1,
+  pages: [{ pageNumber: 1, dataUrl: pageDataUrl }],
+};
+
+const evidenceInput = {
+  fileName: "example.pdf",
+  totalPages: 1,
+  regions: [
+    {
+      regionId: "screenshot-1",
+      type: "rights_screenshot" as const,
+      pageNumber: 1,
+      rightsImageIndex: 1,
+      resultIndex: 1,
+      readingOrder: 1,
+      dataUrl: cropDataUrl,
+    },
+  ],
+};
+
+const urlReviewInput = {
+  fileName: "example.pdf",
+  totalPages: 1,
+  pairs: [
+    {
+      screenshotId: "screenshot-1",
+      pageNumber: 1,
+      addressBarRegionId: "address-1",
+      colorDataUrl: cropDataUrl,
+      grayscaleDataUrl: cropDataUrl,
+    },
+  ],
+};
+
+const tableInput = {
+  fileName: "example.pdf",
+  totalPages: 1,
+  regions: [
+    {
+      regionId: "table-1",
+      pageNumber: 1,
+      readingOrder: 1,
+      dataUrl: cropDataUrl,
+    },
+  ],
+};
+
+const associationInput = {
+  screenshots: [
+    {
+      id: "screenshot-1",
+      pageNumber: 1,
+      rightsImageIndex: 1,
+      resultIndex: 1,
+      readingOrder: 1,
+    },
+  ],
+  tableRows: [
+    {
+      id: "table-row-1",
+      pageNumber: 1,
+      rightsImageIndex: 1,
+      resultIndex: 1,
+      readingOrder: 1,
+    },
+  ],
+};
+
+function modelResponse(content: unknown, status = 200) {
+  return Response.json(
+    { choices: [{ message: { content: JSON.stringify(content) } }] },
+    { status },
+  );
+}
 
 test("builds qwen3.7-plus page requests in non-thinking JSON mode", () => {
   const request = buildPageExtractionRequest({
@@ -88,6 +180,88 @@ test("builds finalization requests without max_tokens", () => {
   assert.deepEqual(request.response_format, { type: "json_object" });
   assert.equal(request.enable_thinking, false);
   assert.equal("max_tokens" in request, false);
+});
+
+test("builds five isolated qwen3.7-plus JSON requests", () => {
+  const layout = buildLayoutRequest(layoutInput);
+  const evidence = buildEvidenceRequest(evidenceInput);
+  const review = buildUrlReviewRequest(urlReviewInput);
+  const table = buildTableRequest(tableInput);
+  const association = buildAssociationRequest(associationInput);
+
+  for (const request of [layout, evidence, review, table, association]) {
+    assert.equal(request.model, "qwen3.7-plus");
+    assert.equal(request.enable_thinking, false);
+    assert.deepEqual(request.response_format, { type: "json_object" });
+    assert.equal("max_tokens" in request, false);
+  }
+
+  assert.doesNotMatch(JSON.stringify(evidence.messages[1]), /tableRowId/);
+  assert.doesNotMatch(JSON.stringify(table.messages[1]), /screenshotId/);
+  assert.doesNotMatch(
+    JSON.stringify(association.messages[1]),
+    /publisher|publishedAt|https?:\/\//,
+  );
+
+  const reviewImages = JSON.stringify(review.messages[1]).match(
+    /image_url/g,
+  );
+  assert.equal(reviewImages?.length, 4);
+});
+
+test("retries one retryable upstream failure and validates the second response", async () => {
+  let calls = 0;
+  const client = createBailianClient({
+    apiKey: "test-secret",
+    baseUrl:
+      "https://ws-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    fetchImpl: async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response("temporary", { status: 503 })
+        : modelResponse(strictLayout);
+    },
+  });
+
+  assert.equal((await client.locateRegions(layoutInput)).pages.length, 1);
+  assert.equal(calls, 2);
+});
+
+test("does not retry deterministic upstream request errors", async () => {
+  let calls = 0;
+  const client = createBailianClient({
+    apiKey: "test-secret",
+    baseUrl:
+      "https://ws-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response("bad request details", { status: 400 });
+    },
+  });
+
+  await assert.rejects(client.locateRegions(layoutInput), BailianClientError);
+  assert.equal(calls, 1);
+});
+
+test("validates every strict stage output", async () => {
+  const outputs = [
+    strictEvidence,
+    strictUrlReview,
+    strictTable,
+    strictAssociation,
+  ];
+  let index = 0;
+  const client = createBailianClient({
+    apiKey: "test-secret",
+    baseUrl:
+      "https://ws-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    fetchImpl: async () => modelResponse(outputs[index++]),
+  });
+
+  assert.equal((await client.recognizeEvidence(evidenceInput)).screenshots.length, 1);
+  assert.equal((await client.reviewUrls(urlReviewInput)).reviews.length, 1);
+  assert.equal((await client.extractTable(tableInput)).rows.length, 1);
+  assert.equal((await client.associateRows(associationInput)).associations.length, 1);
 });
 
 test("calls the workspace endpoint and validates page JSON", async () => {
