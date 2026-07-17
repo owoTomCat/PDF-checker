@@ -310,7 +310,11 @@ h3 {
 }
 
 .status-dot.rendering,
-.status-dot.extracting,
+.status-dot.locating,
+.status-dot.recognizing,
+.status-dot.reviewing_urls,
+.status-dot.extracting_table,
+.status-dot.associating,
 .status-dot.finalizing {
   background: #d99022;
 }

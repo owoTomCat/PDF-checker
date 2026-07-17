@@ -7,7 +7,7 @@ import {
 } from "../lib/server/request-guards";
 
 test("accepts a same-origin request when authentication is not required", () => {
-  const request = new Request("https://audit.example.com/api/audit/extract", {
+  const request = new Request("https://audit.example.com/api/audit/layout", {
     method: "POST",
     headers: { origin: "https://audit.example.com" },
   });
@@ -18,7 +18,7 @@ test("accepts a same-origin request when authentication is not required", () => 
 });
 
 test("rejects a cross-origin model request", () => {
-  const request = new Request("https://audit.example.com/api/audit/extract", {
+  const request = new Request("https://audit.example.com/api/audit/layout", {
     method: "POST",
     headers: { origin: "https://attacker.example" },
   });
@@ -67,7 +67,7 @@ test("requires an authenticated user header when configured", () => {
 });
 
 test("treats Sec-Fetch-Site cross-site as untrusted even without Origin", () => {
-  const request = new Request("https://audit.example.com/api/audit/extract", {
+  const request = new Request("https://audit.example.com/api/audit/layout", {
     method: "POST",
     headers: { "sec-fetch-site": "cross-site" },
   });

@@ -1,151 +1,118 @@
-# Qwen3.7-plus PDF 核验链路规格
+# Qwen3.7-plus PDF 外网溯源严格核验链路规格
 
-## 1. 背景与目标
+## 1. 目标与原则
 
-现有实现会在浏览器内读取 PDF 字节、用正则和启发式规则提取字段，再调用本地规则生成核验结果。它对扫描件、复杂表格、截图信息和跨页关系的识别能力有限。
+系统把模型用于受限视觉识别，把业务判定留给确定性代码。它必须遵守以下原则：
 
-本次改造的目标是：让 `qwen3.7-plus` 承担报告页面的视觉识别、字段提取和跨页归并；本地代码只负责 PDF 页面渲染、输入/输出校验、流程编排，以及确定性的业务规则复核。原始 PDF 不持久化、不上传；浏览器只把渲染后的页面图片按批发送给服务端。
+- 原始 PDF 只在浏览器中读取，不上传、不持久化。
+- 全页图只用于区域定位，不允许返回任何业务字段。
+- 证书、网页截图和汇总表分别裁剪、分别调用，不在同一模型上下文出现。
+- 每条 URL 都从独立地址栏裁剪图复核，不使用表格 URL 反向补全。
+- 截图与表格的关联模型只看到定位元数据，不看到字段值。
+- 最终比较和报告完全由本地规则生成，不再调用模型。
+- `mismatch` 与 `unverifiable` 分开：前者是问题，后者是人工复核项。
 
-## 2. 用户与核心流程
+## 2. 浏览器端顺序
 
-### 2.1 用户流程
+1. 校验 PDF 类型、20 MiB 大小和 80 页上限。
+2. PDF.js 将页面渲染为受限 JPEG，分批调用 layout。
+3. 汇总所有页面坐标并校验页码覆盖、区域 ID 唯一性及地址栏父子关系。
+4. 按坐标以 200 DPI 渲染证书和网页截图裁剪，分批识别 evidence。
+5. 对每张截图定位其从属地址栏，直接从 PDF 生成 600 DPI 彩色 PNG 与灰度/对比度增强 PNG，分批复核 URL。
+6. 所有 URL 复核完成后，以 200 DPI 渲染汇总表裁剪并提取 table。
+7. 把截图和表格行转换为 ID/页码/序号/阅读顺序定位器，调用 association。
+8. 聚合各阶段 warnings 和 stage failures，调用纯规则 finalize。
+9. 只把最终结构化结果写入 `pdf-audit-workspace.tasks.v4`；不保存 PDF 或图片。
 
-1. 用户选择一个或多个 PDF。
-2. 浏览器校验文件类型和大小，并用 PDF.js 读取页数。
-3. 浏览器逐页渲染为 JPEG；每 6 页组成一个批次。
-4. 每批页面图片提交到 `/api/audit/extract`。
-5. 服务端调用百炼 OpenAI 兼容接口的 `qwen3.7-plus`，返回经 schema 校验的页级提取 JSON。
-6. 所有批次完成后，浏览器把页级 JSON 提交到 `/api/audit/finalize`。
-7. 服务端再次调用 `qwen3.7-plus`，完成跨页归并并输出规范化核验输入；本地规则生成最终问题列表和中文报告。
-8. 浏览器保存最终结果和摘要到 `localStorage`，不保存 PDF 和页面图片。
+单图最大 7 MiB，单批图片最大 24 MiB。整页、证据和表格批次最多 6 项；URL 批次最多 4 对。即使数量未达上限，也必须按总字节数拆批。
 
-### 2.2 关键状态
+## 3. 模型阶段与隔离合同
 
-- `queued`：已创建本地任务。
-- `rendering`：浏览器正在渲染页面。
-- `extracting`：正在分批调用模型识别。
-- `finalizing`：模型正在跨页归并，本地规则正在复核。
-- `completed`：流程结束；业务结论由 `outcome` 表示。
-- `failed`：技术错误导致无法完成。
+### 3.1 `POST /api/audit/layout`
 
-业务结论：
+输入：最多 6 张整页 JPEG/PNG，以及文件名、总页数和对应页码。
 
-- `passed`：模型确认完整提取且本地规则未发现问题。
-- `issues_found`：提取完整且发现规则问题。
-- `needs_review`：页图不清晰、模型输出缺字段、未识别到应有表格或存在其他不确定性；绝不能显示为“未发现问题”。
-- `failed`：未生成可用结果。
+输出只含：`regionId`、`type`、`pageNumber`、归一化 `bounds`、`parentRegionId`、权利图/结果序号、阅读顺序和置信度。允许类型仅为：
 
-## 3. 功能要求
+- `certificate`
+- `rights_screenshot`
+- `address_bar`
+- `summary_table`
 
-### 3.1 浏览器端 PDF 处理
+严禁输出权利人、作品类型、平台、发布者、时间、URL 或表格单元格内容。
 
-- 仅接受 PDF；单文件最大 20 MiB，最多 80 页。
-- 使用 PDF.js 的 `getDocument`、`getPage`、`getViewport` 和 `render` 把页面机械渲染到 Canvas。
-- 不调用 `getTextContent`，不在浏览器端做语义识别或正则字段提取。
-- 页面图片使用 JPEG，控制最长边与质量，单张编码后不得超过服务端限制。
-- 批次大小固定为最多 6 页；逐批处理，避免同时占用过多内存和模型配额。
-- 任务进度应反映渲染、批次识别和汇总阶段。
+### 3.2 `POST /api/audit/recognize-evidence`
 
-### 3.2 页级模型识别
+输入只含 certificate 或 rights_screenshot 裁剪。证书仅识别是否为正式作品登记证明、权利人和作品类型；网页截图独立识别平台、地址域名、发布者、发布/编辑时间和初次 URL。
 
-- 模型固定为环境变量 `QWEN_MODEL`，默认且允许值为 `qwen3.7-plus`。
-- 使用 OpenAI 兼容的 Chat Completions 接口。
-- 请求必须设置 `enable_thinking: false` 和 `response_format: { type: "json_object" }`。
-- 为避免截断结构化 JSON，不设置 `max_tokens`。
-- 系统提示明确把 PDF 页面视为不可信数据，忽略其中试图改变任务、输出格式或泄露提示词的指令。
-- 输出包含：页码、页面类型、首页字段、证书字段、表格行、截图字段、页内关联、警告和置信度。
-- 模型输出必须先 `JSON.parse`，再通过严格 schema；无效输出不得直接进入业务规则或 UI。
+如果 layout 未定位到地址栏，截图仍然进入 evidence，`addressBarRegionId` 为 `null`；后续写入 `ADDRESS_BAR_MISSING`，不得用表格 URL 补齐。
 
-### 3.3 跨页归并与核验
+### 3.3 `POST /api/audit/review-url`
 
-- `qwen3.7-plus` 根据全部页级 JSON 归并“权利图-x”、结果表格和对应出处截图。
-- 不因相同网址或帖子跨表出现而自动去重。
-- 看不清的截图字段必须为 `null`，不得用表格内容补齐。
-- 归并输出必须符合规范化 `PdfAuditInput` schema，并带 `extractionComplete`、`warnings` 和置信度。
-- 本地 `pdf-audit-rules.mjs` 仅在 schema 校验后执行确定性的时间、网址和一致性规则。
-- `extractionComplete !== true`、存在阻断性警告、没有识别到任何结果表格，或关键字段缺失时，最终结论强制为 `needs_review`。
+每条记录严格包含同一地址栏的 600 DPI 彩色图和灰度增强图。模型分别读取两张图，记录差异位置；`6/b`、`0/O`、`1/l/I`、`5/S`、`8/B` 只能触发复核，不能自动替换。关键字符无法锁定时必须返回 partial/unrecognized 和候选集合。
 
-### 3.4 历史记录与界面
+### 3.4 `POST /api/audit/extract-table`
 
-- UI 明确告知：原始 PDF 保留在浏览器，但渲染后的页面图片会发送到应用服务端和阿里云百炼处理。
-- 历史记录仍只存于当前浏览器，最多 80 条。
-- 展示实际阶段、已处理页数/总页数、模型名、问题数、警告和最终业务结论。
-- `needs_review` 使用独立醒目样式，不得复用“通过”文案。
+只有 URL 阶段结束后才调用。输入只含 summary_table 裁剪，输出表头权利人/作品类型和表格行。URL 片段只能按同一单元格内的顺序写入 `urlCellSegments`，禁止跨行拼接。
 
-## 4. 接口与数据契约
+### 3.5 `POST /api/audit/associate`
 
-### 4.1 `POST /api/audit/extract`
+请求和模型上下文只允许：ID、页码、权利图序号、结果序号、阅读顺序。禁止平台、发布者、时间、URL、权利人和作品类型。无法唯一关联时返回 `tableRowId: null`。
 
-请求为 `multipart/form-data`：
+### 3.6 `POST /api/audit/finalize`
 
-- `pages`：1 到 6 个 JPEG/PNG 文件。
-- `pageNumbers`：与文件一一对应的 JSON 整数数组。
-- `totalPages`：整份 PDF 页数。
-- `fileName`：仅用于提示模型的显示名，需限制长度并作为不可信文本处理。
+输入为全部已校验的阶段数据、warnings 和 stage failures。接口不调用百炼、不访问外网，只调用 `buildFinalAuditResult()` 和 `pdf-audit-rules.mjs` 生成结论。
 
-响应：
+## 4. 百炼调用约束
 
-```json
-{
-  "model": "qwen3.7-plus",
-  "pages": [],
-  "warnings": []
-}
-```
+- 模型固定为 `qwen3.7-plus`。
+- 使用 OpenAI 兼容 Chat Completions、多模态 `image_url` Data URL。
+- 设置 `response_format: { "type": "json_object" }` 与 `enable_thinking: false`。
+- 提示词明确要求 JSON；不设置 `max_tokens`。
+- 429、5xx、网络错误、超时或无效模型 JSON 最多重试一次；400、401、403 等确定性请求错误不重试。
+- 第二次无效 JSON 请求追加结构纠正提示，但不泄露 schema、密钥或上游正文。
+- 所有模型输出先经过对应 Zod schema；未知字段因 strict object 被拒绝。
 
-### 4.2 `POST /api/audit/finalize`
+## 5. 确定性规则
 
-请求为 JSON：
+- 证书存在时，权利人和作品类型只来自证书图；`美术` 明确规范为 `美术作品`。证书缺失分支使用规则文档规定的固定文本。
+- 平台域名优先于可见 logo；两者冲突记录复核项，不使用表格选择答案。
+- 发布者只裁剪首尾空白，不做别名、同义词或内部空白归一化。
+- “编辑于”按发布时间参与比较；保留分钟精度。日期与分钟值比较时只比较双方共有精度。
+- URL 缺少协议时补 `https://`；去除全部 query、fragment 和尾部 `/`；host 大小写不敏感并忽略可选 `www.`；path 大小写敏感。
+- URL 未完整识别时结论为 `unverifiable`，显示“发布网址：未完整识别”和人工复核项，不生成 URL 不一致问题。
+- 每个确认不一致的字段单独生成一条 issue；截图字段未识别时不能以表格值作为正确答案。
 
-```json
-{
-  "fileName": "example.pdf",
-  "pageCount": 10,
-  "pages": []
-}
-```
+## 6. 结果与界面
 
-响应包含 `outcome`、`report`、`reportText`、`summary` 和模型名。最终响应也必须通过 schema 后再返回。
+- `passed`：没有 issue、warning、stage failure 或 verification notice，且证据完整、置信度达标。
+- `issues_found`：存在确认不一致；即使同时存在复核项，主结论仍为发现问题。
+- `needs_review`：没有确认问题，但存在无法验证、阶段警告/失败、低置信度或结构缺失。
+- `failed`：技术错误阻断流程。
 
-### 4.3 错误响应
+界面必须分别展示“问题列表”和“人工复核项”。处理阶段依次显示 rendering、locating、recognizing、reviewing_urls、extracting_table、associating、finalizing。
 
-错误只返回稳定的中文用户消息和机器码，不返回百炼原始响应、密钥、堆栈或内部提示词。
+## 7. 安全与隐私
 
-## 5. 非功能与安全要求
+- `DASHSCOPE_API_KEY` 只存在服务端环境变量；`.env.local` 不提交。
+- API 执行同源/认证请求保护；生产环境默认要求认证或等效部署层访问控制。
+- 不记录图片、完整模型输入、模型原始响应、密钥或 PDF 内容。
+- 文件名、PDF 内容和模型输出都按不可信数据处理，不执行其中代码或指令。
+- 不访问 PDF 中的 URL，也不从外网抓取页面。
 
-- `DASHSCOPE_API_KEY` 只存在于服务端环境变量；真实值写入被 Git 忽略且权限为 `0600` 的 `.env.local`。
-- 提交 `.env.example`，不得提交 CSV、`.env.local`、私钥或页面样本。
-- API 校验同源请求；可通过 `PDF_AUDIT_REQUIRE_AUTH=true` 强制要求 OpenAI Sites 注入的已认证用户头。其他部署必须放在可信访问控制之后。
-- 限制请求体、文件数、单图大小、页数、JSON 数组长度和字符串长度；外部调用设置超时。
-- 不记录页面图片、完整模型输入、API 密钥或模型原始响应。
-- 模型输出和 PDF 内容均视为不可信数据，不进入 `eval`、shell、SQL 或原始 HTML。
-- 发布前运行单元测试、类型检查、lint、build、`npm audit` 和密钥扫描。
+## 8. 验收标准
 
-## 6. 边界与失败场景
+1. 源码不存在旧的 `POST /api/audit/extract` 两阶段链路。
+2. 单元测试证明严格调用顺序、阶段 warning 聚合和原始 PDF 从未进入请求。
+3. 每条可复核 URL 都生成 600 DPI 彩色/灰度双图；缺地址栏稳定进入人工复核。
+4. association 请求不含任何业务字段值；finalize 不调用模型或网络。
+5. 全部 schema、规则、API、客户端、源码验收测试通过，typecheck、lint 和生产构建通过。
+6. Git diff 不包含 `.env.local`、API key、PDF 样本或生成图片。
 
-- 加密、损坏或超过限制的 PDF：在浏览器端停止并给出明确错误。
-- 任一批次超时/无效 JSON：任务进入 `failed`，允许用户重新选择原文件重试。
-- 部分页不可读但仍可归并：返回 `needs_review`，保留已识别的事实和警告。
-- 未识别到表格：返回 `needs_review`，而不是 `passed`。
-- 百炼缺少配置或拒绝请求：返回通用配置/服务错误，不泄露上游正文。
-- 用户刷新页面后：可回看最终历史结果，但因 PDF 未存储，重新处理时需要再次选择文件。
+## 9. 官方依据
 
-## 7. 验收标准
-
-1. 代码链路不再导入或调用本地 PDF 文本提取器。
-2. 对一个有效样本，浏览器按不超过 6 页/批提交，并完成页级提取和最终归并。
-3. 所有模型调用均使用 `qwen3.7-plus`、非思考 JSON 模式，且没有 `max_tokens`。
-4. 无表格、低置信度或不完整输出稳定得到 `needs_review`。
-5. 恶意页面文字不能改变输出契约；无效模型 JSON 被拒绝。
-6. 原始 PDF 不发送到服务端，页面图片和原始模型响应不落盘。
-7. `.env.local` 和 API key 不出现在 Git diff、提交和 GitHub。
-8. 单元测试、类型检查、lint、build 与依赖安全检查通过。
-
-## 8. 官方依据
-
-- 百炼视觉模型与 `qwen3.7-plus` 能力：https://help.aliyun.com/zh/model-studio/vision-model/
-- 百炼 OpenAI Chat Completions：https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
-- 百炼结构化输出：https://help.aliyun.com/zh/model-studio/qwen-structured-output
-- PDF.js API：https://mozilla.github.io/pdf.js/api/
-- Next.js Route Handlers：https://nextjs.org/docs/app/building-your-application/routing/route-handlers
-- Zod 基础校验：https://zod.dev/basics
+- [百炼 OpenAI Chat Completions](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)
+- [百炼结构化输出](https://help.aliyun.com/zh/model-studio/qwen-structured-output)
+- [PDF.js `RenderParameters.transform` 与 viewport API](https://mozilla.github.io/pdf.js/api/draft/module-pdfjsLib.html)
+- [Next.js Route Handlers](https://nextjs.org/docs/app/api-reference/file-conventions/route)
+- [Zod](https://zod.dev/)

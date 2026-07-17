@@ -1,19 +1,25 @@
 import type {
   AuditOutcome,
-  AuditReport,
-  ExtractionSummary,
+  StrictAuditReport,
+  StrictExtractionSummary,
 } from "./ai/contracts";
 
 export type TaskStatus =
   | "queued"
   | "rendering"
-  | "extracting"
+  | "locating"
+  | "recognizing"
+  | "reviewing_urls"
+  | "extracting_table"
+  | "associating"
   | "finalizing"
   | "completed"
   | "failed";
 
+export type AuditReport = StrictAuditReport;
+export type ExtractionSummary = StrictExtractionSummary;
 export type AuditIssueDto = AuditReport["issues"][number];
-export type { AuditOutcome, AuditReport, ExtractionSummary };
+export type { AuditOutcome };
 
 export type AuditTaskSummary = {
   id: string;

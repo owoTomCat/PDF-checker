@@ -462,7 +462,7 @@ test("finalize API is deterministic and does not call the model", async () => {
   }
 });
 
-test("legacy finalize API still rejects an oversized declared body during migration", async () => {
+test("finalize API rejects an oversized declared body", async () => {
   const response = await finalizeAudit(
     new Request("https://audit.example.com/api/audit/finalize", {
       method: "POST",

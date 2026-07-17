@@ -11,19 +11,27 @@ import type {
   TaskStatus,
 } from "@/lib/types";
 
-const STORAGE_KEY = "pdf-audit-workspace.tasks.v3";
+const STORAGE_KEY = "pdf-audit-workspace.tasks.v4";
 const ACTIVE_STATUSES = new Set<TaskStatus>([
   "queued",
   "rendering",
-  "extracting",
+  "locating",
+  "recognizing",
+  "reviewing_urls",
+  "extracting_table",
+  "associating",
   "finalizing",
 ]);
 
 const statusCopy: Record<TaskStatus, string> = {
   queued: "排队中",
   rendering: "渲染页面",
-  extracting: "AI 识别",
-  finalizing: "跨页归并",
+  locating: "定位证据区域",
+  recognizing: "识别证书和截图",
+  reviewing_urls: "复核地址栏 URL",
+  extracting_table: "提取汇总表",
+  associating: "关联截图与表格",
+  finalizing: "执行确定性规则",
   completed: "已完成",
   failed: "失败",
 };
@@ -316,8 +324,8 @@ export function AuditConsole() {
           <p className="eyebrow">Qwen AI Audit Workspace</p>
           <h1>外网溯源结果报告自动核验台</h1>
           <p className="hero-text">
-            浏览器把 PDF 机械渲染成页面图片，阿里云百炼的 qwen3.7-plus
-            负责视觉识别、字段提取和跨页归并，再由本地确定性规则复核网址、时间和字段一致性。
+            浏览器先定位并裁剪相互隔离的证书、网页截图、地址栏和汇总表区域；阿里云百炼的
+            qwen3.7-plus 分阶段识别，最后由确定性规则复核网址、时间和字段一致性。
           </p>
           <div className="hero-actions">
             <button type="button" onClick={() => inputRef.current?.click()}>
@@ -374,8 +382,8 @@ export function AuditConsole() {
         <div>
           <h2>拖入或选择外网溯源报告</h2>
           <p>
-            原始 PDF 留在当前浏览器；渲染后的页面图片会发送到应用服务端和阿里云百炼处理。
-            页面图片不保存，最终结果只存于当前浏览器历史。
+            原始 PDF 留在当前浏览器；只有定位用页面图和隔离后的证据裁剪图会发送到应用服务端及阿里云百炼。
+            截图裁剪看不到汇总表，每条地址栏都使用 600 DPI 彩色与灰度增强图分别复核；图片不保存。
           </p>
         </div>
         <button
@@ -490,16 +498,16 @@ export function AuditConsole() {
                     <strong>{selectedTask.summary.pageCount}</strong>
                   </div>
                   <div>
-                    <span>结果表格</span>
+                    <span>权利字段</span>
+                    <strong>{selectedTask.summary.rightsFieldCount}</strong>
+                  </div>
+                  <div>
+                    <span>结果组</span>
                     <strong>{selectedTask.summary.groupCount}</strong>
                   </div>
                   <div>
                     <span>表格行</span>
                     <strong>{selectedTask.summary.tableRowCount}</strong>
-                  </div>
-                  <div>
-                    <span>模型置信度</span>
-                    <strong>{Math.round(selectedTask.summary.confidence * 100)}%</strong>
                   </div>
                 </div>
               ) : null}
@@ -510,11 +518,26 @@ export function AuditConsole() {
 
               {selectedTask.summary?.warnings.length ? (
                 <div className="warning-box">
-                  <h3>人工复核提示</h3>
+                  <h3>处理警告</h3>
                   <ul>
                     {selectedTask.summary.warnings.map((warning, index) => (
                       <li key={`${index}-${warning}`}>{warning}</li>
                     ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {selectedTask.report?.verificationNotices.length ? (
+                <div className="warning-box">
+                  <h3>人工复核项</h3>
+                  <ul>
+                    {selectedTask.report.verificationNotices.map(
+                      (noticeItem, index) => (
+                        <li key={`${noticeItem.code}-${index}`}>
+                          {noticeItem.message}
+                        </li>
+                      ),
+                    )}
                   </ul>
                 </div>
               ) : null}

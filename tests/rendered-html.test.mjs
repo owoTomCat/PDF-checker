@@ -5,13 +5,23 @@ import test from "node:test";
 const templateRoot = new URL("../", import.meta.url);
 const previewRoot = new URL("../app/_sites-preview/", import.meta.url);
 
-test("defines the Qwen PDF audit workspace UI and metadata", async () => {
-  const [page, layout, consoleSource, pipelineSource, rendererSource] = await Promise.all([
+test("defines the strict Qwen PDF audit workspace UI and metadata", async () => {
+  const [
+    page,
+    layout,
+    consoleSource,
+    pipelineSource,
+    rendererSource,
+    readme,
+    specification,
+  ] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/AuditConsole.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/client/audit-pipeline.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/client/pdf-renderer.ts", import.meta.url), "utf8"),
+    readFile(new URL("../README.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/spec-qwen-ai-pipeline.md", import.meta.url), "utf8"),
   ]);
 
   assert.match(layout, /title:\s*"PDF 外网溯源报告核验"/);
@@ -21,11 +31,28 @@ test("defines the Qwen PDF audit workspace UI and metadata", async () => {
   assert.match(consoleSource, /runAiAuditPipeline/);
   assert.match(consoleSource, /localStorage/);
   assert.match(consoleSource, /qwen3\.7-plus/);
-  assert.match(consoleSource, /页面图片/);
+  assert.match(consoleSource, /定位用页面图/);
   assert.match(consoleSource, /阿里云百炼/);
   assert.match(consoleSource, /需人工复核/);
-  assert.match(pipelineSource, /\/api\/audit\/extract/);
+  assert.match(consoleSource, /问题列表/);
+  assert.match(consoleSource, /人工复核项/);
+  assert.match(consoleSource, /pdf-audit-workspace\.tasks\.v4/);
+  for (const endpoint of [
+    "layout",
+    "recognize-evidence",
+    "review-url",
+    "extract-table",
+    "associate",
+  ]) {
+    assert.match(pipelineSource, new RegExp(`/api/audit/${endpoint}`));
+  }
   assert.match(pipelineSource, /\/api\/audit\/finalize/);
+  assert.doesNotMatch(pipelineSource, /\/api\/audit\/extract["']/);
+  assert.match(readme, /截图裁剪看不到汇总表/);
+  assert.match(readme, /600 DPI/);
+  assert.match(readme, /彩色.*灰度|灰度.*彩色/s);
+  assert.match(specification, /\/api\/audit\/review-url/);
+  assert.doesNotMatch(specification, /POST \/api\/audit\/extract\s/);
   assert.doesNotMatch(rendererSource, /getTextContent/);
   assert.doesNotMatch(consoleSource, /runAuditFromPdf/);
   assert.doesNotMatch(consoleSource, /PDF 不会上传到服务器/);

@@ -9,145 +9,13 @@ export const MIN_COMPLETE_CONFIDENCE = 0.8;
 
 const shortText = z.string().max(500);
 const longText = z.string().max(2_000);
-const nullableShortText = shortText.nullable();
 const nullableLongText = longText.nullable();
 const pageNumber = z.number().int().min(1).max(MAX_PDF_PAGES);
 const confidence = z.number().min(0).max(1);
 const warnings = z.array(z.string().min(1).max(500)).max(20);
-
-export const FirstPageTableSchema = z.strictObject({
-  caseNumber: shortText,
-  feedbackDate: shortText,
-  rightsHolderName: shortText,
-  workType: shortText,
-});
-
-export const PageFirstPageTableSchema = z.strictObject({
-  caseNumber: nullableShortText,
-  feedbackDate: nullableShortText,
-  rightsHolderName: nullableShortText,
-  workType: nullableShortText,
-});
-
-export const CertificateSchema = z.strictObject({
-  isRegistrationCertificate: z.boolean(),
-  copyrightOwner: nullableShortText,
-  workType: nullableShortText,
-  sourcePage: pageNumber.nullable(),
-});
-
-export const ResultKindSchema = z.enum([
-  "VALID",
-  "POSSIBLY_VALID",
-  "PARTIALLY_VALID",
-  "INVALID",
-  "OTHER_NON_INVALID",
-]);
-
-export const ResultTableRowSchema = z.strictObject({
-  resultId: nullableShortText,
-  networkSource: shortText,
-  uploader: shortText,
-  url: longText,
-  imageComparisonResult: shortText,
-  networkPublishedAt: shortText,
-  checkedAt: shortText,
-  resultKind: ResultKindSchema,
-});
-
-export const ScreenshotResultSchema = z.strictObject({
-  resultId: shortText,
-  platform: nullableShortText,
-  publisher: nullableShortText,
-  publishedAt: nullableShortText,
-  url: nullableLongText,
-  sourcePage: pageNumber.nullable(),
-});
-
-export const PageResultTableSchema = z.strictObject({
-  groupLabel: nullableShortText,
-  resultKind: ResultKindSchema,
-  rows: z.array(ResultTableRowSchema).max(100),
-});
-
-export const PageScreenshotSchema = z.strictObject({
-  groupLabel: nullableShortText,
-  resultId: nullableShortText,
-  platform: nullableShortText,
-  publisher: nullableShortText,
-  publishedAt: nullableShortText,
-  url: nullableLongText,
-});
-
-export const PageExtractionSchema = z.strictObject({
-  pageNumber,
-  pageType: z.enum([
-    "cover",
-    "certificate",
-    "result_table",
-    "screenshot",
-    "other",
-  ]),
-  firstPageTable: PageFirstPageTableSchema.nullable(),
-  certificate: CertificateSchema.nullable(),
-  resultTables: z.array(PageResultTableSchema).max(20),
-  screenshots: z.array(PageScreenshotSchema).max(50),
-  warnings,
-  confidence,
-});
-
-export const BatchExtractionSchema = z.strictObject({
-  pages: z.array(PageExtractionSchema).min(1).max(MAX_BATCH_PAGES),
-  warnings,
-});
-
-export const RightImageGroupSchema = z.strictObject({
-  label: shortText,
-  tablePage: pageNumber,
-  tableRows: z.array(ResultTableRowSchema).max(500),
-  screenshotResults: z.array(ScreenshotResultSchema).max(500),
-});
-
-export const FinalModelOutputSchema = z.strictObject({
-  firstPageTable: FirstPageTableSchema,
-  certificate: CertificateSchema.nullable(),
-  groups: z.array(RightImageGroupSchema).max(MAX_PDF_PAGES),
-  extractionComplete: z.boolean(),
-  confidence,
-  warnings,
-});
-
-export const PdfAuditInputSchema = z.strictObject({
-  firstPageTable: FirstPageTableSchema,
-  certificate: CertificateSchema.nullable(),
-  groups: z.array(RightImageGroupSchema).max(MAX_PDF_PAGES),
-});
-
-export const AuditIssueSchema = z.strictObject({
-  code: z.string().min(1).max(100),
-  scope: z.enum(["CERTIFICATE", "RESULT", "CHRONOLOGY", "STRUCTURE"]),
-  groupLabel: nullableShortText,
-  resultId: nullableShortText,
-  message: z.string().min(1).max(2_000),
-});
-
-export const AuditReportSchema = z.strictObject({
-  certificateIssues: z.array(AuditIssueSchema).max(1_000),
-  resultIssues: z.array(AuditIssueSchema).max(5_000),
-  issues: z.array(AuditIssueSchema).max(6_000),
-});
-
-export const ExtractionSummarySchema = z.strictObject({
-  parserMode: z.string().min(1).max(200),
-  pageCount: z.number().int().min(1).max(MAX_PDF_PAGES),
-  firstPageFields: z.number().int().min(0).max(4),
-  groupCount: z.number().int().min(0).max(MAX_PDF_PAGES),
-  tableRowCount: z.number().int().min(0).max(40_000),
-  screenshotHeadingCount: z.number().int().min(0).max(40_000),
-  warnings,
-  confidence,
-  extractionComplete: z.boolean(),
-});
+const documentWarnings = z
+  .array(z.string().min(1).max(500))
+  .max(MAX_PDF_PAGES * 20);
 
 export const AuditOutcomeSchema = z.enum([
   "passed",
@@ -155,93 +23,8 @@ export const AuditOutcomeSchema = z.enum([
   "needs_review",
   "failed",
 ]);
-
-export const ExtractApiResponseSchema = z.strictObject({
-  model: z.literal("qwen3.7-plus"),
-  pages: z.array(PageExtractionSchema).min(1).max(MAX_BATCH_PAGES),
-  warnings,
-});
-
-export const FinalAuditResponseSchema = z.strictObject({
-  model: z.literal("qwen3.7-plus"),
-  outcome: AuditOutcomeSchema,
-  input: PdfAuditInputSchema,
-  report: AuditReportSchema,
-  reportText: z.string().max(1_000_000),
-  summary: ExtractionSummarySchema,
-});
-
-export const ExtractRequestMetadataSchema = z.strictObject({
-  fileName: z.string().min(1).max(255),
-  pageNumbers: z.array(pageNumber).min(1).max(MAX_BATCH_PAGES),
-  totalPages: z.number().int().min(1).max(MAX_PDF_PAGES),
-});
-
-export const FinalizeRequestSchema = z.strictObject({
-  fileName: z.string().min(1).max(255),
-  pageCount: z.number().int().min(1).max(MAX_PDF_PAGES),
-  pages: z.array(PageExtractionSchema).min(1).max(MAX_PDF_PAGES),
-});
-
 export type AuditOutcome = z.infer<typeof AuditOutcomeSchema>;
-export type BatchExtraction = z.infer<typeof BatchExtractionSchema>;
-export type PageExtraction = z.infer<typeof PageExtractionSchema>;
-export type FinalModelOutput = z.infer<typeof FinalModelOutputSchema>;
-export type PdfAuditInput = z.infer<typeof PdfAuditInputSchema>;
-export type AuditIssue = z.infer<typeof AuditIssueSchema>;
-export type AuditReport = z.infer<typeof AuditReportSchema>;
-export type ExtractionSummary = z.infer<typeof ExtractionSummarySchema>;
-export type FinalAuditResponse = z.infer<typeof FinalAuditResponseSchema>;
 
-function isBlank(value: string | null) {
-  return value === null || value.trim().length === 0;
-}
-
-function hasMissingScreenshotEvidence(output: FinalModelOutput) {
-  return output.groups.some((group) => {
-    const screenshotByResult = new Map(
-      group.screenshotResults.map((item) => [item.resultId.trim(), item]),
-    );
-
-    return group.tableRows.some((row) => {
-      if (!row.resultId?.trim()) return false;
-      const screenshot = screenshotByResult.get(row.resultId.trim());
-      return (
-        !screenshot ||
-        isBlank(screenshot.platform) ||
-        isBlank(screenshot.publisher) ||
-        isBlank(screenshot.publishedAt) ||
-        isBlank(screenshot.url)
-      );
-    });
-  });
-}
-
-export function deriveAuditOutcome(
-  output: FinalModelOutput,
-  issueCount: number,
-): AuditOutcome {
-  const missingFirstPageField = Object.values(output.firstPageTable).some(
-    (value) => value.trim().length === 0,
-  );
-  const tableRowCount = output.groups.reduce(
-    (total, group) => total + group.tableRows.length,
-    0,
-  );
-  const requiresReview =
-    !output.extractionComplete ||
-    output.confidence < MIN_COMPLETE_CONFIDENCE ||
-    output.warnings.length > 0 ||
-    missingFirstPageField ||
-    tableRowCount === 0 ||
-    hasMissingScreenshotEvidence(output);
-
-  if (requiresReview) return "needs_review";
-  return issueCount > 0 ? "issues_found" : "passed";
-}
-
-// Strict external-source audit contracts. The legacy two-stage contracts above
-// remain temporarily available while the callers migrate task by task.
 export const RecognitionStatusSchema = z.enum([
   "recognized",
   "partial",
@@ -498,29 +281,29 @@ export const StageFailureSchema = z.strictObject({
 
 export const DocumentLayoutSchema = z.strictObject({
   pages: z.array(PageLayoutSchema).min(1).max(MAX_PDF_PAGES),
-  warnings,
+  warnings: documentWarnings,
 });
 
 export const DocumentEvidenceSchema = z.strictObject({
   certificates: z.array(CertificateObservationSchema).max(MAX_PDF_PAGES * 2),
   screenshots: z.array(ScreenshotObservationSchema).max(40_000),
-  warnings,
+  warnings: documentWarnings,
 });
 
 export const DocumentUrlReviewsSchema = z.strictObject({
   reviews: z.array(UrlReviewSchema).max(40_000),
-  warnings,
+  warnings: documentWarnings,
 });
 
 export const DocumentTableSchema = z.strictObject({
   headers: z.array(TableHeaderSchema).max(MAX_PDF_PAGES),
   rows: z.array(StrictTableRowSchema).max(40_000),
-  warnings,
+  warnings: documentWarnings,
 });
 
 export const DocumentAssociationsSchema = z.strictObject({
   associations: z.array(AssociationSchema).max(40_000),
-  warnings,
+  warnings: documentWarnings,
 });
 
 export const StrictFinalizeRequestSchema = z.strictObject({
@@ -531,7 +314,7 @@ export const StrictFinalizeRequestSchema = z.strictObject({
   urlReviews: DocumentUrlReviewsSchema,
   table: DocumentTableSchema,
   associations: DocumentAssociationsSchema,
-  warnings,
+  warnings: documentWarnings,
   stageFailures: z.array(StageFailureSchema).max(1_000),
 });
 
@@ -654,7 +437,7 @@ export const StrictExtractionSummarySchema = z.strictObject({
   groupCount: z.number().int().min(0).max(10_000),
   tableRowCount: z.number().int().min(0).max(40_000),
   screenshotHeadingCount: z.number().int().min(0).max(40_000),
-  warnings,
+  warnings: documentWarnings,
   confidence,
   extractionComplete: z.boolean(),
 });
@@ -686,6 +469,10 @@ export type StrictTableRow = z.infer<typeof StrictTableRowSchema>;
 export type TableBatch = z.infer<typeof TableBatchSchema>;
 export type AssociationBatch = z.infer<typeof AssociationBatchSchema>;
 export type StrictFinalizeRequest = z.infer<typeof StrictFinalizeRequestSchema>;
+export type StrictAuditReport = z.infer<typeof StrictAuditReportSchema>;
+export type StrictExtractionSummary = z.infer<
+  typeof StrictExtractionSummarySchema
+>;
 export type StrictFinalAuditResponse = z.infer<
   typeof StrictFinalAuditResponseSchema
 >;

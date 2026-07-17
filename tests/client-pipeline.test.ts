@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAX_PDF_BYTES } from "../lib/ai/contracts";
+import {
+  MAX_PDF_BYTES,
+  type StrictFinalizeRequest,
+} from "../lib/ai/contracts";
 import { buildFinalAuditResult } from "../lib/audit-result";
 import {
   chunkPageNumbers,
@@ -89,7 +92,7 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
   const calls: string[] = [];
   const progressStages = new Set<string>();
   let destroyed = false;
-  let finalBody: Record<string, unknown> | undefined;
+  let finalBody: StrictFinalizeRequest | undefined;
   const document: RenderedPdfDocument = {
     pageCount: 1,
     async renderPage(pageNumber) {
@@ -144,8 +147,11 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
         ]);
       }
       if (stage === "/api/audit/finalize") {
-        finalBody = JSON.parse(String(init?.body));
-        return Response.json(buildFinalAuditResult(finalBody as never));
+        const parsedBody = JSON.parse(
+          String(init?.body),
+        ) as StrictFinalizeRequest;
+        finalBody = parsedBody;
+        return Response.json(buildFinalAuditResult(parsedBody));
       }
       return Response.json(responseForStage(stage));
     },
@@ -190,7 +196,7 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
 
 test("records a missing address bar without substituting the table URL", async () => {
   const calls: string[] = [];
-  let finalBody: Record<string, any> | undefined;
+  let finalBody: StrictFinalizeRequest | undefined;
   const layoutWithoutAddress = {
     ...strictLayout,
     pages: [
@@ -255,8 +261,11 @@ test("records a missing address bar without substituting the table URL", async (
         return Response.json({ model: "qwen3.7-plus", ...strictAssociation });
       }
       if (stage === "/api/audit/finalize") {
-        finalBody = JSON.parse(String(init?.body));
-        return Response.json(buildFinalAuditResult(finalBody as never));
+        const parsedBody = JSON.parse(
+          String(init?.body),
+        ) as StrictFinalizeRequest;
+        finalBody = parsedBody;
+        return Response.json(buildFinalAuditResult(parsedBody));
       }
       throw new Error(`unexpected stage: ${stage}`);
     },
