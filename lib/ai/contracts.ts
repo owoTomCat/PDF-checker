@@ -101,12 +101,51 @@ export const PageLayoutSchema = z
     });
 
     page.regions.forEach((region, index) => {
-      if (region.type !== "address_bar") {
+      if (region.type === "certificate" || region.type === "summary_table") {
         if (region.parentRegionId !== null) {
           context.addIssue({
             code: "custom",
             path: ["regions", index, "parentRegionId"],
-            message: "仅地址栏区域允许设置父区域。",
+            message: "证书和汇总表不能设置父区域。",
+          });
+        }
+        if (region.rightsImageIndex !== null) {
+          context.addIssue({
+            code: "custom",
+            path: ["regions", index, "rightsImageIndex"],
+            message: "证书和汇总表不能设置权利图序号。",
+          });
+        }
+        if (region.resultIndex !== null) {
+          context.addIssue({
+            code: "custom",
+            path: ["regions", index, "resultIndex"],
+            message: "证书和汇总表不能设置结果序号。",
+          });
+        }
+        return;
+      }
+
+      if (region.type === "rights_screenshot") {
+        if (region.parentRegionId !== null) {
+          context.addIssue({
+            code: "custom",
+            path: ["regions", index, "parentRegionId"],
+            message: "网页截图不能设置父区域。",
+          });
+        }
+        if (region.rightsImageIndex === null) {
+          context.addIssue({
+            code: "custom",
+            path: ["regions", index, "rightsImageIndex"],
+            message: "网页截图必须设置权利图序号。",
+          });
+        }
+        if (region.resultIndex === null) {
+          context.addIssue({
+            code: "custom",
+            path: ["regions", index, "resultIndex"],
+            message: "网页截图必须设置结果序号。",
           });
         }
         return;
@@ -120,6 +159,21 @@ export const PageLayoutSchema = z
           code: "custom",
           path: ["regions", index, "parentRegionId"],
           message: "地址栏必须从属于同页网页截图。",
+        });
+        return;
+      }
+      if (region.rightsImageIndex !== parent.rightsImageIndex) {
+        context.addIssue({
+          code: "custom",
+          path: ["regions", index, "rightsImageIndex"],
+          message: "地址栏的权利图序号必须与父截图一致。",
+        });
+      }
+      if (region.resultIndex !== parent.resultIndex) {
+        context.addIssue({
+          code: "custom",
+          path: ["regions", index, "resultIndex"],
+          message: "地址栏的结果序号必须与父截图一致。",
         });
       }
     });

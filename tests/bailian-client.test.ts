@@ -126,6 +126,14 @@ test("builds five isolated qwen3.7-plus JSON requests", () => {
   assert.equal(layout.messages[0]?.content, LAYOUT_SYSTEM_PROMPT);
   assert.match(LAYOUT_SYSTEM_PROMPT, /只定位区域/);
   assert.match(LAYOUT_SYSTEM_PROMPT, /不可信/);
+  assert.match(
+    LAYOUT_SYSTEM_PROMPT,
+    /独立权利图、图片对比区域[\s\S]+不得标为 rights_screenshot/,
+  );
+  assert.match(
+    LAYOUT_SYSTEM_PROMPT,
+    /案件基本信息表[\s\S]+不属于 summary_table/,
+  );
   assert.doesNotMatch(JSON.stringify(evidence.messages[1]), /tableRowId/);
   assert.doesNotMatch(JSON.stringify(table.messages[1]), /screenshotId/);
   assert.doesNotMatch(
@@ -171,6 +179,30 @@ test("adds a JSON correction prompt only after invalid model output", async () =
   assert.equal(bodies.length, 2);
   assert.doesNotMatch(bodies[0], /上一次响应未通过/);
   assert.match(bodies[1], /上一次响应未通过/);
+});
+
+test("retries a layout whose screenshot indices are incomplete", async () => {
+  let calls = 0;
+  const invalidLayout = {
+    ...strictLayout,
+    pages: [
+      {
+        ...strictLayout.pages[0],
+        regions: strictLayout.pages[0].regions.map((region) =>
+          region.regionId === "screenshot-1"
+            ? { ...region, resultIndex: null }
+            : region,
+        ),
+      },
+    ],
+  };
+  const client = clientWithFetch(async () => {
+    calls += 1;
+    return modelResponse(calls === 1 ? invalidLayout : strictLayout);
+  });
+
+  assert.equal((await client.locateRegions(layoutInput)).pages.length, 1);
+  assert.equal(calls, 2);
 });
 
 test("does not retry deterministic upstream request errors", async () => {

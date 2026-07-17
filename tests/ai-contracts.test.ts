@@ -29,6 +29,50 @@ test("layout schema accepts geometry and rejects transcribed business text", () 
   );
 });
 
+function layoutWithRegion(
+  regionId: string,
+  patch: Record<string, unknown>,
+) {
+  return {
+    ...strictLayout,
+    pages: [
+      {
+        ...strictLayout.pages[0],
+        regions: strictLayout.pages[0].regions.map((region) =>
+          region.regionId === regionId ? { ...region, ...patch } : region,
+        ),
+      },
+    ],
+  };
+}
+
+test("layout schema enforces indices for every region type", () => {
+  assert.equal(
+    LayoutBatchSchema.safeParse(
+      layoutWithRegion("screenshot-1", { resultIndex: null }),
+    ).success,
+    false,
+  );
+  assert.equal(
+    LayoutBatchSchema.safeParse(
+      layoutWithRegion("certificate-1", { rightsImageIndex: 1 }),
+    ).success,
+    false,
+  );
+  assert.equal(
+    LayoutBatchSchema.safeParse(
+      layoutWithRegion("table-1", { resultIndex: 1 }),
+    ).success,
+    false,
+  );
+  assert.equal(
+    LayoutBatchSchema.safeParse(
+      layoutWithRegion("address-1", { resultIndex: 2 }),
+    ).success,
+    false,
+  );
+});
+
 test("rejects a normalized region that leaves the page", () => {
   assert.equal(
     BoundsSchema.safeParse({ x: 0.8, y: 0.1, width: 0.3, height: 0.2 })
