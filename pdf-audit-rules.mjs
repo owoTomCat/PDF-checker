@@ -1,522 +1,566 @@
 /**
- * PDF 外网溯源报告核验规则模块
+ * PDF 外网溯源报告严格核验规则。
  *
- * 用途：供后续 Codex Sites/Node.js 站点接入 PDF 渲染、OCR 或视觉模型后复用。
- * 本文件不负责读取 PDF；调用方需要先把 PDF 页面转换成结构化识别结果，
- * 再调用 validatePdfAudit() 和 formatPdfAuditReport()。
+ * 本模块只消费已经隔离并通过 schema 校验的证书、截图、URL 复核和
+ * 汇总表数据，不读取 PDF、不调用模型，也不访问识别出的 URL。
  */
 
 export const PDF_AUDIT_RULES = Object.freeze({
-  version: "1.0.0",
-  firstPage: {
-    tableFields: ["案号", "反馈时间", "权利人名称", "作品类型"],
-    certificateTitle: "作品登记证书",
-    certificateFields: ["著作权人", "作品类型"],
-    noCertificateAction: "未提供「作品登记证书」，无需核验。",
-  },
-  resultTable: {
-    columns: [
-      "序号",
-      "网络出处",
-      "上传者",
-      "网址",
-      "图片对比结果",
-      "网络端发表时间",
-      "查重时间",
-    ],
-    ignoredColumns: ["图片对比结果"],
-  },
-  grouping: {
-    rule: "PDF 中每个结果表格都必须独立核验，不得因帖子相同而合并或去重。",
-    labelPattern: "权利图-x",
-  },
-  extraction: {
-    rule: "帖子信息必须从“结果n出处截图和信息截图”独立提取，禁止用表格反填。",
-    postFields: ["发布平台", "发布者", "发布时间", "发布网址"],
-    unreadableRule: "无法辨认时标记为无法识别，不得猜测。",
-  },
-  comparisons: {
-    fields: ["网络出处", "上传者", "网址", "网络端发表时间"],
-    datePrecision:
-      "表格只有日期、截图包含时分秒时，只要自然日相同即视为一致。",
-    urlNormalization:
-      "协议、www、末尾斜杠和明确的分享追踪参数差异不构成错误；帖子标识必须一致。",
-    textNormalization:
-      "只忽略排版造成的空格和换行；账号正文中的文字、数字、符号不得随意删除。",
-  },
-  chronology: {
-    invalidResult: "无效查重的网络端发表时间应晚于查重时间。",
-    otherResult: "其他类型查重的网络端发表时间应早于或等于查重时间。",
-  },
+  version: "2.0.0",
+  workflow: ["截图独立识别", "汇总表独立提取", "归一化比较"],
+  ambiguousUrlCharacters: ["6/b", "0/O", "1/l/I", "5/S", "8/B"],
+  noCertificateRecognition: "pdf文件中未提供作品登记证书",
+  noCertificateEvaluation:
+    "pdf文件中未提供作品登记证书，不进行核查",
 });
 
-export const PDF_AUDIT_WORKFLOW = Object.freeze([
-  "渲染 PDF 第一页，读取案号、反馈时间、权利人名称、作品类型。",
-  "检查第一页的1至2张图片中是否存在标题为“作品登记证书”的图片。",
-  "存在证书时，独立提取著作权人和作品类型，并与首页表格核验。",
-  "扫描整份 PDF，定位每一个结果表格及其所属权利图编号。",
-  "每个表格单独建立权利图分组；结果编号在不同表格中可重复。",
-  "定位每个“结果n出处截图和信息截图”页面，独立提取帖子信息。",
-  "将截图信息与同组表格对应行逐字段比较，并检查序号空白行。",
-  "根据表格所属查重类型，检查发表时间与查重时间的先后关系。",
-  "汇总全部错误并按固定中文格式输出；无错误时输出统一结论。",
-]);
-
-export const RESULT_KIND = Object.freeze({
-  VALID: "VALID",
-  POSSIBLY_VALID: "POSSIBLY_VALID",
-  PARTIALLY_VALID: "PARTIALLY_VALID",
-  INVALID: "INVALID",
-  OTHER_NON_INVALID: "OTHER_NON_INVALID",
-});
-
-/**
- * @typedef {Object} FirstPageTable
- * @property {string} caseNumber
- * @property {string} feedbackDate
- * @property {string} rightsHolderName
- * @property {string} workType
- */
-
-/**
- * @typedef {Object} CertificateExtraction
- * @property {boolean} isRegistrationCertificate
- * @property {string|null} copyrightOwner
- * @property {string|null} workType
- * @property {number|null} [sourcePage]
- */
-
-/**
- * @typedef {Object} ScreenshotPostExtraction
- * @property {string} resultId 例如“结果1”
- * @property {string|null} platform
- * @property {string|null} publisher
- * @property {string|null} publishedAt
- * @property {string|null} url
- * @property {number|null} [sourcePage]
- */
-
-/**
- * @typedef {Object} ResultTableRow
- * @property {string|null} resultId 序号列为空时必须传 null
- * @property {string} networkSource
- * @property {string} uploader
- * @property {string} url
- * @property {string} imageComparisonResult 仅保存，不参与额外核验
- * @property {string} networkPublishedAt
- * @property {string} checkedAt 合并单元格的值应复制到所属的每一行
- * @property {string} resultKind 使用 RESULT_KIND 中的值
- */
-
-/**
- * @typedef {Object} RightImageGroup
- * @property {string} label 例如“权利图-1”
- * @property {number} tablePage
- * @property {ResultTableRow[]} tableRows
- * @property {ScreenshotPostExtraction[]} screenshotResults
- */
-
-/**
- * @typedef {Object} PdfAuditInput
- * @property {FirstPageTable} firstPageTable
- * @property {CertificateExtraction|null} certificate
- * @property {RightImageGroup[]} groups
- */
-
-/**
- * @typedef {Object} AuditIssue
- * @property {string} code
- * @property {"CERTIFICATE"|"RESULT"|"CHRONOLOGY"|"STRUCTURE"} scope
- * @property {string|null} groupLabel
- * @property {string|null} resultId
- * @property {string} message
- */
-
-const TRACKING_QUERY_KEYS = new Set([
-  "app_platform",
-  "app_version",
-  "ignoreengage",
-  "sec_source",
-  "share_from_user_hidden",
-  "type",
-  "xsec_source",
-  "xsec_token",
+const WORK_TYPE_ALIASES = new Map([
+  ["美术", "美术作品"],
+  ["美术作品", "美术作品"],
 ]);
 
 const PLATFORM_ALIASES = new Map([
-  ["douyin", "抖音"],
-  ["抖音", "抖音"],
-  ["xiaohongshu", "小红书"],
-  ["小红书", "小红书"],
   ["weibo", "微博"],
   ["微博", "微博"],
-  ["facebook", "Facebook"],
-  ["汇图网", "汇图网"],
+  ["xiaohongshu", "小红书"],
+  ["小红书", "小红书"],
+  ["douyin", "抖音"],
+  ["抖音", "抖音"],
+]);
+
+const PLATFORM_BY_DOMAIN = new Map([
+  ["weibo.com", "微博"],
+  ["xiaohongshu.com", "小红书"],
 ]);
 
 function text(value) {
   return String(value ?? "").normalize("NFKC").trim();
 }
 
-function compactText(value) {
-  return text(value).replace(/\s+/g, "");
+function recognizedText(observation) {
+  if (!observation || observation.status !== "recognized") return null;
+  const value = text(observation.rawText);
+  return value || null;
 }
 
-function normalizeOwner(value) {
-  return compactText(value).replace(
-    /[（(][^）)]*[＊*]{2,}[^）)]*[）)]/g,
-    "",
-  );
+function displayObservation(observation) {
+  const value = recognizedText(observation);
+  if (value) return value;
+  return observation?.status === "partial" ? "未完整识别" : "未识别";
 }
 
-function displayCertificateOwner(value) {
-  return normalizeOwner(value) || "无法识别";
+export function normalizeWorkType(value) {
+  const normalized = text(value);
+  return WORK_TYPE_ALIASES.get(normalized) ?? normalized;
 }
 
 export function normalizePlatform(value) {
-  const normalized = compactText(value);
-  return PLATFORM_ALIASES.get(normalized.toLowerCase()) ??
+  const normalized = text(value);
+  return (
+    PLATFORM_ALIASES.get(normalized.toLowerCase()) ??
     PLATFORM_ALIASES.get(normalized) ??
-    normalized;
+    normalized
+  );
+}
+
+export function comparePublisher(left, right) {
+  return text(left) === text(right);
+}
+
+function hostFromValue(value) {
+  const raw = text(value).replace(/\s+/g, "");
+  if (!raw) return "";
+  try {
+    const parsed = new URL(
+      /^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`,
+    );
+    return parsed.hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return raw
+      .replace(/^[a-z][a-z\d+.-]*:\/\//i, "")
+      .split(/[/?#]/, 1)[0]
+      .toLowerCase()
+      .replace(/^www\./, "");
+  }
+}
+
+function platformFromHost(value) {
+  const host = hostFromValue(value);
+  for (const [domain, platform] of PLATFORM_BY_DOMAIN) {
+    if (host === domain || host.endsWith(`.${domain}`)) return platform;
+  }
+  return "";
+}
+
+function resolvedScreenshotPlatform(screenshot) {
+  const visible = recognizedText(screenshot?.visiblePlatform);
+  const visiblePlatform = visible ? normalizePlatform(visible) : "";
+  const host = recognizedText(screenshot?.addressHost);
+  const domainPlatform = host ? platformFromHost(host) : "";
+  return {
+    value: domainPlatform || visiblePlatform,
+    conflict:
+      Boolean(domainPlatform) &&
+      Boolean(visiblePlatform) &&
+      domainPlatform !== visiblePlatform,
+    visiblePlatform,
+    domainPlatform,
+  };
 }
 
 /**
- * 生成用于帖子身份比较的规范网址。不会返回给用户展示。
+ * 返回仅用于比较的规范 URL。协议、www、全部查询参数、片段和末尾斜杠
+ * 不参与比较；路径大小写保持不变。
  */
 export function canonicalPostUrl(value) {
   const raw = text(value).replace(/\s+/g, "");
   if (!raw) return "";
-
   const withScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(raw)
     ? raw
     : `https://${raw}`;
-
   try {
     const parsed = new URL(withScheme);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
     const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
-    const path = parsed.pathname.replace(/\/+$/, "") || "/";
-    const params = [...parsed.searchParams.entries()]
-      .filter(([key]) => !TRACKING_QUERY_KEYS.has(key.toLowerCase()))
-      .sort(([a], [b]) => a.localeCompare(b));
-    const query = new URLSearchParams(params).toString();
-    return `${host}${path}${query ? `?${query}` : ""}`;
+    const path = parsed.pathname.replace(/\/+$/, "");
+    return `${host}${path}`;
   } catch {
-    return raw
-      .replace(/^[a-z][a-z\d+.-]*:\/\//i, "")
-      .replace(/^www\./i, "")
-      .replace(/\/+$/, "");
+    return "";
   }
 }
 
-function parseDateTime(value) {
+export function stableDisplayUrl(value) {
+  const raw = text(value).replace(/\s+/g, "");
+  if (!raw) return "";
+  const withScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(raw)
+    ? raw
+    : `https://${raw}`;
+  try {
+    const parsed = new URL(withScheme);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const path = parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.protocol}//${host}${path}`;
+  } catch {
+    return "";
+  }
+}
+
+function parsePublishedAt(value, yearContextClear) {
   const normalized = text(value)
+    .replace(/^(?:编辑于|发布于|发表于)\s*/, "")
     .replace(/[年/.]/g, "-")
     .replace(/月/g, "-")
     .replace(/日/g, " ");
   const match = normalized.match(
-    /(\d{2,4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/,
+    /(?:^|\D)(\d{2}|\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/,
   );
   if (!match) return null;
 
   let year = Number(match[1]);
-  if (year < 100) year += 2000;
-
-  const parts = {
+  if (year < 100) {
+    if (!yearContextClear) return null;
+    year += 2000;
+  }
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4] ?? 0);
+  const minute = Number(match[5] ?? 0);
+  const second = Number(match[6] ?? 0);
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31 ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59 ||
+    second < 0 ||
+    second > 59
+  ) {
+    return null;
+  }
+  const timestamp = Date.UTC(year, month - 1, day, hour, minute, second);
+  const date = new Date(timestamp);
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return {
     year,
-    month: Number(match[2]),
-    day: Number(match[3]),
-    hour: Number(match[4] ?? 0),
-    minute: Number(match[5] ?? 0),
-    second: Number(match[6] ?? 0),
+    month,
+    day,
+    hour,
+    minute,
     hasTime: match[4] !== undefined,
-    hasSecond: match[6] !== undefined,
   };
-  parts.timestamp = Date.UTC(
-    parts.year,
-    parts.month - 1,
-    parts.day,
-    parts.hour,
-    parts.minute,
-    parts.second,
-  );
-  return parts;
 }
 
-function samePublishedAt(left, right) {
-  const a = parseDateTime(left);
-  const b = parseDateTime(right);
-  if (!a || !b) return compactText(left) === compactText(right);
-
-  const sameDate =
-    a.year === b.year && a.month === b.month && a.day === b.day;
-  if (!sameDate) return false;
-
-  // 任一侧只有日期时，以自然日为比较精度。
-  if (!a.hasTime || !b.hasTime) return true;
-  if (a.hour !== b.hour || a.minute !== b.minute) return false;
-  if (!a.hasSecond || !b.hasSecond) return true;
-  return a.second === b.second;
+export function comparePublishedAt(
+  screenshotValue,
+  tableValue,
+  yearContextClear = true,
+) {
+  const screenshot = parsePublishedAt(screenshotValue, yearContextClear);
+  const table = parsePublishedAt(tableValue, true);
+  if (!screenshot || !table) return "unverifiable";
+  if (
+    screenshot.year !== table.year ||
+    screenshot.month !== table.month ||
+    screenshot.day !== table.day
+  ) {
+    return "mismatch";
+  }
+  if (!screenshot.hasTime || !table.hasTime) return "match";
+  return screenshot.hour === table.hour && screenshot.minute === table.minute
+    ? "match"
+    : "mismatch";
 }
 
-function compareDateTime(left, right) {
-  const a = parseDateTime(left);
-  const b = parseDateTime(right);
-  if (!a || !b) return null;
-
-  const sameDate =
-    a.year === b.year && a.month === b.month && a.day === b.day;
-  // 任一侧只有日期时，同一自然日不能推定具体先后。
-  if (sameDate && (!a.hasTime || !b.hasTime)) return 0;
-  return Math.sign(a.timestamp - b.timestamp);
+function finding(
+  code,
+  scope,
+  rightsImageIndex,
+  resultIndex,
+  field,
+  message,
+) {
+  return {
+    code,
+    scope,
+    rightsImageIndex,
+    resultIndex,
+    field,
+    message,
+  };
 }
 
-function makeIssue(code, scope, message, groupLabel = null, resultId = null) {
-  return { code, scope, groupLabel, resultId, message };
+function resultPrefix(screenshot) {
+  return `权利图-${screenshot.rightsImageIndex}，结果${screenshot.resultIndex}`;
 }
 
-function valueOrUnreadable(value) {
-  return text(value) || "无法识别";
+function tableUrl(row) {
+  return (row?.urlCellSegments ?? []).map((segment) => text(segment)).join("");
 }
 
-function resultPrefix(groupLabel, resultId) {
-  return `${groupLabel}${resultId ? ` ${resultId}` : ""}`;
+function unverifiableMessage(prefix, fieldLabel, tableValue, partial = false) {
+  const recognition = partial ? "截图未完整识别" : "截图未识别";
+  return `${prefix}，${recognition}，无法验证汇总表中的${fieldLabel}“${text(tableValue)}”`;
 }
 
 /**
- * 对已经完成 OCR/视觉识别的结构化数据执行全部规则核验。
- * @param {PdfAuditInput} input
+ * 对已经隔离的结构化证据执行确定性核验。
  */
 export function validatePdfAudit(input) {
-  if (!input?.firstPageTable || !Array.isArray(input.groups)) {
-    throw new TypeError("缺少 firstPageTable 或 groups，无法执行核验。");
+  if (
+    !input ||
+    !Array.isArray(input.screenshots) ||
+    !Array.isArray(input.tableRows) ||
+    !Array.isArray(input.urlReviews) ||
+    !Array.isArray(input.associations)
+  ) {
+    throw new TypeError("缺少严格核验输入，无法执行核验。");
   }
 
-  /** @type {AuditIssue[]} */
   const certificateIssues = [];
-  /** @type {AuditIssue[]} */
   const resultIssues = [];
-  const certificate = input.certificate;
+  const verificationNotices = [];
 
-  if (certificate?.isRegistrationCertificate) {
-    if (!text(certificate.copyrightOwner)) {
-      certificateIssues.push(
-        makeIssue(
-          "CERTIFICATE_OWNER_UNREADABLE",
-          "CERTIFICATE",
-          "作品登记证书中的著作权人无法识别",
+  if (input.certificatePresence === "uncertain") {
+    verificationNotices.push(
+      finding(
+        "CERTIFICATE_PRESENCE_UNCERTAIN",
+        "RIGHTS",
+        null,
+        null,
+        "structure",
+        "作品登记证书提供状态未识别，无法核查权利人名称和作品类型",
+      ),
+    );
+  } else if (input.certificatePresence === "provided") {
+    const certificate = input.certificate;
+    const header = input.tableHeader;
+    const owner = recognizedText(certificate?.owner);
+    const tableOwner = recognizedText(header?.rightsHolderName);
+    if (!owner || !tableOwner) {
+      verificationNotices.push(
+        finding(
+          "RIGHTS_HOLDER_UNVERIFIABLE",
+          "RIGHTS",
+          null,
+          null,
+          "rightsHolderName",
+          `截图未识别，无法验证汇总表中的权利人名称“${text(
+            header?.rightsHolderName?.rawText,
+          )}”`,
         ),
       );
-    } else if (
-      normalizeOwner(certificate.copyrightOwner) !==
-      normalizeOwner(input.firstPageTable.rightsHolderName)
-    ) {
+    } else if (text(owner) !== text(tableOwner)) {
       certificateIssues.push(
-        makeIssue(
+        finding(
           "RIGHTS_HOLDER_MISMATCH",
-          "CERTIFICATE",
-          `权利人名称填写错误，应为${displayCertificateOwner(certificate.copyrightOwner)}，现错误填写为${text(input.firstPageTable.rightsHolderName)}`,
+          "RIGHTS",
+          null,
+          null,
+          "rightsHolderName",
+          `权利人填写错误，应为${owner}，现错误填写为${tableOwner}`,
         ),
       );
     }
 
-    if (!text(certificate.workType)) {
-      certificateIssues.push(
-        makeIssue(
-          "CERTIFICATE_WORK_TYPE_UNREADABLE",
-          "CERTIFICATE",
-          "作品登记证书中的作品类型无法识别",
+    const workType = recognizedText(certificate?.workType);
+    const tableWorkType = recognizedText(header?.workType);
+    if (!workType || !tableWorkType) {
+      verificationNotices.push(
+        finding(
+          "WORK_TYPE_UNVERIFIABLE",
+          "RIGHTS",
+          null,
+          null,
+          "workType",
+          `截图未识别，无法验证汇总表中的作品类型“${text(
+            header?.workType?.rawText,
+          )}”`,
         ),
       );
     } else if (
-      compactText(certificate.workType) !==
-      compactText(input.firstPageTable.workType)
+      normalizeWorkType(workType) !== normalizeWorkType(tableWorkType)
     ) {
       certificateIssues.push(
-        makeIssue(
+        finding(
           "WORK_TYPE_MISMATCH",
-          "CERTIFICATE",
-          `作品类型填写错误，应为${text(certificate.workType)}，现错误填写为${text(input.firstPageTable.workType)}`,
+          "RIGHTS",
+          null,
+          null,
+          "workType",
+          `作品类型填写错误，应为${normalizeWorkType(
+            workType,
+          )}，现错误填写为${tableWorkType}`,
         ),
       );
     }
   }
 
-  for (const group of input.groups) {
-    const groupLabel = text(group.label) || "未标注权利图";
-    const screenshotByResult = new Map(
-      (group.screenshotResults ?? []).map((item) => [
-        compactText(item.resultId),
-        item,
-      ]),
-    );
-
-    for (const row of group.tableRows ?? []) {
-      const resultId = compactText(row.resultId);
-      if (!resultId) {
-        resultIssues.push(
-          makeIssue(
-            "EMPTY_SEQUENCE",
-            "STRUCTURE",
-            `${groupLabel}表格中存在序号为空的行，无法确定其对应结果`,
-            groupLabel,
-          ),
-        );
-        continue;
-      }
-
-      const screenshot = screenshotByResult.get(resultId);
-      if (!screenshot) {
-        resultIssues.push(
-          makeIssue(
-            "SCREENSHOT_NOT_FOUND",
-            "STRUCTURE",
-            `${resultPrefix(groupLabel, resultId)}未找到对应的出处截图和信息截图`,
-            groupLabel,
-            resultId,
-          ),
-        );
-        continue;
-      }
-
-      const expectedPlatform = valueOrUnreadable(screenshot.platform);
-      const expectedPublisher = valueOrUnreadable(screenshot.publisher);
-      const expectedUrl = valueOrUnreadable(screenshot.url);
-      const expectedPublishedAt = valueOrUnreadable(screenshot.publishedAt);
-
-      if (!text(screenshot.platform)) {
-        resultIssues.push(
-          makeIssue(
-            "SCREENSHOT_PLATFORM_UNREADABLE",
-            "RESULT",
-            `${resultPrefix(groupLabel, resultId)}截图中的发布平台无法识别`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      } else if (
-        normalizePlatform(screenshot.platform) !==
-        normalizePlatform(row.networkSource)
-      ) {
-        resultIssues.push(
-          makeIssue(
-            "PLATFORM_MISMATCH",
-            "RESULT",
-            `${resultPrefix(groupLabel, resultId)}表格中网络出处填写错误，应为${expectedPlatform}，表格中错误写为${text(row.networkSource)}`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      }
-
-      if (!text(screenshot.publisher)) {
-        resultIssues.push(
-          makeIssue(
-            "SCREENSHOT_PUBLISHER_UNREADABLE",
-            "RESULT",
-            `${resultPrefix(groupLabel, resultId)}截图中的发布者无法识别`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      } else if (
-        compactText(screenshot.publisher) !== compactText(row.uploader)
-      ) {
-        resultIssues.push(
-          makeIssue(
-            "PUBLISHER_MISMATCH",
-            "RESULT",
-            `${resultPrefix(groupLabel, resultId)}表格中发布者填写错误，应为${expectedPublisher}，表格中错误写为${text(row.uploader)}`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      }
-
-      if (!text(screenshot.url)) {
-        resultIssues.push(
-          makeIssue(
-            "SCREENSHOT_URL_UNREADABLE",
-            "RESULT",
-            `${resultPrefix(groupLabel, resultId)}截图中的发布网址无法识别`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      } else if (canonicalPostUrl(screenshot.url) !== canonicalPostUrl(row.url)) {
-        resultIssues.push(
-          makeIssue(
-            "URL_MISMATCH",
-            "RESULT",
-            `${resultPrefix(groupLabel, resultId)}表格中发布网址填写错误，应为${expectedUrl}，表格中错误写为${text(row.url)}`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      }
-
-      if (!text(screenshot.publishedAt)) {
-        resultIssues.push(
-          makeIssue(
-            "SCREENSHOT_PUBLISHED_AT_UNREADABLE",
-            "RESULT",
-            `${resultPrefix(groupLabel, resultId)}截图中的发布时间无法识别`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      } else if (!samePublishedAt(screenshot.publishedAt, row.networkPublishedAt)) {
-        resultIssues.push(
-          makeIssue(
-            "PUBLISHED_AT_MISMATCH",
-            "RESULT",
-            `${resultPrefix(groupLabel, resultId)}表格中网络端发表时间填写错误，应为${expectedPublishedAt}，表格中错误写为${text(row.networkPublishedAt)}`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      }
-
-      const chronology = compareDateTime(
-        row.networkPublishedAt,
-        row.checkedAt,
+  const tableRows = new Map(
+    input.tableRows.map((row) => [row.tableRowId, row]),
+  );
+  const urlReviews = new Map(
+    input.urlReviews.map((review) => [review.screenshotId, review]),
+  );
+  const associations = new Map();
+  for (const association of input.associations) {
+    if (associations.has(association.screenshotId)) {
+      verificationNotices.push(
+        finding(
+          "DUPLICATE_ASSOCIATION",
+          "STRUCTURE",
+          null,
+          null,
+          "association",
+          `截图 ${association.screenshotId} 存在重复表格关联，需人工复核`,
+        ),
       );
-      if (chronology === null) {
-        resultIssues.push(
-          makeIssue(
-            "CHRONOLOGY_UNREADABLE",
-            "CHRONOLOGY",
-            `${resultPrefix(groupLabel, resultId)}无法判断网络端发表时间与查重时间的先后关系`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      } else if (
-        row.resultKind === RESULT_KIND.INVALID &&
-        chronology <= 0
-      ) {
-        resultIssues.push(
-          makeIssue(
-            "INVALID_RESULT_TIME_ORDER",
-            "CHRONOLOGY",
-            `${resultPrefix(groupLabel, resultId)}属于无效查重，但网络端发表时间${text(row.networkPublishedAt)}未晚于查重时间${text(row.checkedAt)}`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      } else if (
-        row.resultKind !== RESULT_KIND.INVALID &&
-        chronology > 0
-      ) {
-        resultIssues.push(
-          makeIssue(
-            "NON_INVALID_RESULT_TIME_ORDER",
-            "CHRONOLOGY",
-            `${resultPrefix(groupLabel, resultId)}不属于无效查重，但网络端发表时间${text(row.networkPublishedAt)}晚于查重时间${text(row.checkedAt)}`,
-            groupLabel,
-            resultId,
-          ),
-        );
-      }
+    }
+    associations.set(association.screenshotId, association);
+  }
+
+  const usedTableRows = new Set();
+  const screenshots = [...input.screenshots].sort(
+    (left, right) =>
+      left.rightsImageIndex - right.rightsImageIndex ||
+      left.resultIndex - right.resultIndex ||
+      left.pageNumber - right.pageNumber,
+  );
+
+  for (const screenshot of screenshots) {
+    const prefix = resultPrefix(screenshot);
+    const association = associations.get(screenshot.screenshotId);
+    if (
+      !association ||
+      !association.tableRowId ||
+      association.confidence < 0.8
+    ) {
+      verificationNotices.push(
+        finding(
+          "ASSOCIATION_UNVERIFIABLE",
+          "STRUCTURE",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "association",
+          `${prefix}，无法唯一关联汇总表结果行`,
+        ),
+      );
+      continue;
+    }
+
+    const row = tableRows.get(association.tableRowId);
+    if (!row) {
+      verificationNotices.push(
+        finding(
+          "TABLE_ROW_UNVERIFIABLE",
+          "STRUCTURE",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "association",
+          `${prefix}，关联的汇总表结果行不存在`,
+        ),
+      );
+      continue;
+    }
+    usedTableRows.add(row.tableRowId);
+
+    const screenshotPlatform = resolvedScreenshotPlatform(screenshot);
+    const rowPlatform = recognizedText(row.platform);
+    if (screenshotPlatform.conflict) {
+      verificationNotices.push(
+        finding(
+          "PLATFORM_SOURCE_CONFLICT",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "platform",
+          `${prefix}，页面平台标识“${screenshotPlatform.visiblePlatform}”与地址栏域名平台“${screenshotPlatform.domainPlatform}”冲突，已按地址栏域名识别`,
+        ),
+      );
+    }
+    if (!screenshotPlatform.value || !rowPlatform) {
+      verificationNotices.push(
+        finding(
+          "PLATFORM_UNVERIFIABLE",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "platform",
+          unverifiableMessage(prefix, "发布平台", row.platform?.rawText),
+        ),
+      );
+    } else if (
+      screenshotPlatform.value !== normalizePlatform(rowPlatform)
+    ) {
+      resultIssues.push(
+        finding(
+          "PLATFORM_MISMATCH",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "platform",
+          `${prefix}，发布平台错误，应为${screenshotPlatform.value}，现错误填写为${rowPlatform}`,
+        ),
+      );
+    }
+
+    const publisher = recognizedText(screenshot.publisher);
+    const rowPublisher = recognizedText(row.publisher);
+    if (!publisher || !rowPublisher) {
+      verificationNotices.push(
+        finding(
+          "PUBLISHER_UNVERIFIABLE",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "publisher",
+          unverifiableMessage(prefix, "发布者", row.publisher?.rawText),
+        ),
+      );
+    } else if (!comparePublisher(publisher, rowPublisher)) {
+      resultIssues.push(
+        finding(
+          "PUBLISHER_MISMATCH",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "publisher",
+          `${prefix}，发布者错误，应为${publisher}，现错误填写为${rowPublisher}`,
+        ),
+      );
+    }
+
+    const publishedAt = recognizedText(screenshot.publishedAt);
+    const rowPublishedAt = recognizedText(row.publishedAt);
+    const timeState =
+      publishedAt && rowPublishedAt
+        ? comparePublishedAt(
+            publishedAt,
+            rowPublishedAt,
+            screenshot.publishedAt.yearContextClear,
+          )
+        : "unverifiable";
+    if (timeState === "unverifiable") {
+      verificationNotices.push(
+        finding(
+          "PUBLISHED_AT_UNVERIFIABLE",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "publishedAt",
+          unverifiableMessage(prefix, "发布时间", row.publishedAt?.rawText),
+        ),
+      );
+    } else if (timeState === "mismatch") {
+      resultIssues.push(
+        finding(
+          "PUBLISHED_AT_MISMATCH",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "publishedAt",
+          `${prefix}，发布时间错误，应为${publishedAt}，现错误填写为${rowPublishedAt}`,
+        ),
+      );
+    }
+
+    const review = urlReviews.get(screenshot.screenshotId);
+    const summaryUrl = tableUrl(row);
+    const reviewedUrl =
+      review?.status === "recognized" &&
+      review.unresolvedCharacters.length === 0
+        ? text(review.finalRead)
+        : "";
+    const screenshotCanonical = canonicalPostUrl(reviewedUrl);
+    const tableCanonical = canonicalPostUrl(summaryUrl);
+    if (!reviewedUrl || !screenshotCanonical || !tableCanonical) {
+      verificationNotices.push(
+        finding(
+          "URL_UNVERIFIABLE",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "url",
+          unverifiableMessage(prefix, "发布网址", summaryUrl, true),
+        ),
+      );
+    } else if (screenshotCanonical !== tableCanonical) {
+      resultIssues.push(
+        finding(
+          "URL_MISMATCH",
+          "RESULT",
+          screenshot.rightsImageIndex,
+          screenshot.resultIndex,
+          "url",
+          `${prefix}，发布网址错误，应为${stableDisplayUrl(
+            reviewedUrl,
+          )}，现错误填写为${summaryUrl}`,
+        ),
+      );
+    }
+  }
+
+  for (const row of input.tableRows) {
+    if (!usedTableRows.has(row.tableRowId)) {
+      verificationNotices.push(
+        finding(
+          "TABLE_ROW_WITHOUT_SCREENSHOT",
+          "STRUCTURE",
+          row.rightsImageIndex,
+          row.resultIndex,
+          "association",
+          `权利图-${row.rightsImageIndex}，结果${row.resultIndex}，汇总表结果行没有可验证的截图对应项`,
+        ),
+      );
     }
   }
 
@@ -525,91 +569,114 @@ export function validatePdfAudit(input) {
     certificateIssues,
     resultIssues,
     issues: [...certificateIssues, ...resultIssues],
+    verificationNotices,
   };
 }
 
-/**
- * 输出用户约定的中文格式。
- * @param {ReturnType<typeof validatePdfAudit>} report
- * @param {{needsReview?: boolean, warnings?: string[]}} [options]
- */
-export function formatPdfAuditReport(report, options = {}) {
-  const { input, certificateIssues, issues } = report;
-  const lines = ["{", "【权利人名称、作品类型 - 识别结果】"];
-  const certificate = input.certificate;
+function displayPublishedAt(observation) {
+  const value = recognizedText(observation);
+  return value
+    ? value.replace(/^(?:编辑于|发布于|发表于)\s*/, "")
+    : displayObservation(observation);
+}
 
-  if (!certificate?.isRegistrationCertificate) {
-    lines.push("未提供「作品登记证书」，无需核验。");
+function formatCategory(lines, number, label, issues, notices) {
+  if (issues.length === 0 && notices.length === 0) {
+    lines.push(`${number}. ${label}：评估无错误`);
+    return;
+  }
+  if (issues.length === 0) {
+    lines.push(`${number}. ${label}：存在无法验证字段，需人工复核`);
+  } else {
+    lines.push(`${number}. ${label}：`);
+    issues.forEach((issue, index) => {
+      lines.push(`   - 错误点${index + 1}：${issue.message}`);
+    });
+  }
+  notices.forEach((notice) => {
+    lines.push(`   - 复核提示：${notice.message}`);
+  });
+}
+
+/** 输出规则文档约定的中文结构。 */
+export function formatPdfAuditReport(report) {
+  const { input, certificateIssues, resultIssues, verificationNotices } = report;
+  const lines = ["{", "【权利人名称、作品类型 - 识别结果】"];
+
+  if (input.certificatePresence === "not_provided") {
+    lines.push(PDF_AUDIT_RULES.noCertificateRecognition);
+  } else if (input.certificatePresence === "uncertain") {
+    lines.push("作品登记证书提供状态未识别");
   } else {
     lines.push(
-      `提取著作权人：${displayCertificateOwner(certificate.copyrightOwner)}`,
-      `提取作品类型：${valueOrUnreadable(certificate.workType)}`,
+      `提取著作权人：${displayObservation(input.certificate?.owner)}`,
+      `提取作品类型：${normalizeWorkType(
+        displayObservation(input.certificate?.workType),
+      )}`,
     );
-    if (certificateIssues.length === 0) {
-      lines.push("核验「权利人名称」与「作品类型」无错误。");
-    } else {
-      for (const issue of certificateIssues) {
-        lines.push(`错误${issues.indexOf(issue) + 1} ：${issue.message}`);
-      }
-    }
   }
 
   lines.push("", "【权利图 - 识别结果】");
-  for (const group of input.groups) {
-    lines.push("", `【${text(group.label) || "未标注权利图"}】`);
-    for (const result of group.screenshotResults ?? []) {
-      lines.push(
-        `【${text(result.resultId)}识别结果】`,
-        `发布平台：${valueOrUnreadable(result.platform)}`,
-        `发布者：${valueOrUnreadable(result.publisher)}`,
-        `发布时间：${valueOrUnreadable(result.publishedAt)}`,
-        `发布网址：${valueOrUnreadable(result.url)}`,
-      );
-    }
+  const groups = new Map();
+  for (const screenshot of input.screenshots) {
+    const group = groups.get(screenshot.rightsImageIndex) ?? [];
+    group.push(screenshot);
+    groups.set(screenshot.rightsImageIndex, group);
+  }
+  for (const [rightsImageIndex, screenshots] of [...groups.entries()].sort(
+    ([left], [right]) => left - right,
+  )) {
+    lines.push(`【权利图-${rightsImageIndex}】`);
+    screenshots
+      .sort((left, right) => left.resultIndex - right.resultIndex)
+      .forEach((screenshot) => {
+        const platform = resolvedScreenshotPlatform(screenshot).value;
+        const review = input.urlReviews.find(
+          (item) => item.screenshotId === screenshot.screenshotId,
+        );
+        const displayUrl =
+          review?.status === "recognized" &&
+          review.unresolvedCharacters.length === 0
+            ? stableDisplayUrl(review.finalRead)
+            : "";
+        lines.push(
+          `【结果${screenshot.resultIndex}识别结果】`,
+          `发布平台：${platform || displayObservation(screenshot.visiblePlatform)}`,
+          `发布者：${displayObservation(screenshot.publisher)}`,
+          `发布时间：${displayPublishedAt(screenshot.publishedAt)}`,
+          `发布网址：${displayUrl || "未完整识别"}`,
+        );
+      });
   }
 
-  lines.push("", "【评估结果】：");
-  if (options.needsReview) {
-    lines.push("识别结果不完整，需人工复核，当前不能判定为无错误。");
-    for (const warning of options.warnings ?? []) {
-      lines.push(`复核提示：${text(warning)}`);
-    }
-    issues.forEach((issue, index) => {
-      lines.push(`错误${index + 1} ：${issue.message}`);
-    });
-  } else if (issues.length === 0) {
-    lines.push("经核查，pdf中无错误");
+  lines.push("", "【评估结果】");
+  const rightsNotices = verificationNotices.filter(
+    (notice) => notice.scope === "RIGHTS",
+  );
+  const detailNotices = verificationNotices.filter(
+    (notice) => notice.scope !== "RIGHTS",
+  );
+  if (input.certificatePresence === "not_provided") {
+    lines.push(
+      `1. 权利人名称、作品类型：${PDF_AUDIT_RULES.noCertificateEvaluation}`,
+    );
   } else {
-    issues.forEach((issue, index) => {
-      lines.push(`错误${index + 1} ：${issue.message}`);
-    });
+    formatCategory(
+      lines,
+      1,
+      "权利人名称、作品类型",
+      certificateIssues,
+      rightsNotices,
+    );
   }
+  formatCategory(
+    lines,
+    2,
+    "详细发布信息",
+    resultIssues,
+    detailNotices,
+  );
 
   lines.push("}");
   return lines.join("\n");
 }
-
-/**
- * 可直接交给视觉模型/OCR编排层的提取约束。
- */
-export const PDF_AUDIT_EXTRACTION_PROMPT = `
-你正在核验一份“外网溯源结果报告”PDF。
-
-1. 首页：
-   - 提取案号、反馈时间、权利人名称、作品类型。
-   - 检查附图是否有标题为“作品登记证书”的证书。
-   - 只有确认是作品登记证书时，才提取著作权人和作品类型。
-
-2. 结果表格：
-   - 定位整份PDF中的每一个表格，按“权利图-x”分别建组。
-   - 不得因不同表格出现同一帖子而合并或去重。
-   - 提取序号、网络出处、上传者、网址、图片对比结果、网络端发表时间、查重时间。
-   - 序号单元格为空时必须保留为空，不能自动补结果编号。
-   - 合并的查重时间单元格应归属于它覆盖的每一行。
-
-3. 出处截图：
-   - 从每个“结果n出处截图和信息截图”页面独立提取发布平台、发布者、发布时间、发布网址。
-   - 禁止参考表格来补全截图中看不清的信息；无法识别时返回 null。
-
-4. 返回结构必须符合本模块 PdfAuditInput 的 JSDoc 数据契约。
-`.trim();

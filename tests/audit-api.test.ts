@@ -9,6 +9,7 @@ import { POST as reviewUrls } from "../app/api/audit/review-url/route";
 import {
   strictAssociation,
   strictEvidence,
+  strictFinalizeRequest,
   strictLayout,
   strictTable,
   strictUrlReview,
@@ -387,6 +388,35 @@ test("layout API rejects an oversized declared body before multipart parsing", a
 
   assert.equal(response.status, 413);
   assert.equal((await response.json()).error.code, "BATCH_TOO_LARGE");
+});
+
+test("finalize API is deterministic and does not call the model", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    throw new Error("finalize must not call fetch");
+  };
+
+  try {
+    const response = await finalizeAudit(
+      new Request("https://audit.example.com/api/audit/finalize", {
+        method: "POST",
+        headers: {
+          origin: "https://audit.example.com",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(strictFinalizeRequest),
+      }),
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.outcome, "passed");
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("legacy finalize API still rejects an oversized declared body during migration", async () => {
