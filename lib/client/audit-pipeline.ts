@@ -22,6 +22,15 @@ export type PipelineProgress = {
 export type RenderedPdfDocument = {
   pageCount: number;
   renderPage: (pageNumber: number) => Promise<Blob>;
+  renderRegion: (
+    pageNumber: number,
+    bounds: import("../ai/contracts").BoundingBox,
+    options: {
+      dpi: number;
+      variant: "color" | "grayscale-contrast";
+      mimeType: "image/jpeg" | "image/png";
+    },
+  ) => Promise<Blob>;
   destroy: () => Promise<void>;
 };
 

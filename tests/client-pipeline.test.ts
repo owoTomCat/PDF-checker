@@ -95,6 +95,9 @@ test("renders and uploads only page images in six-page batches", async () => {
         type: "image/jpeg",
       });
     },
+    async renderRegion() {
+      throw new Error("legacy pipeline should not render regions");
+    },
     async destroy() {
       destroyed = true;
     },
@@ -158,6 +161,9 @@ test("destroys the PDF document when its page count exceeds the limit", async ()
   const document: RenderedPdfDocument = {
     pageCount: 81,
     async renderPage() {
+      throw new Error("should not render");
+    },
+    async renderRegion() {
       throw new Error("should not render");
     },
     async destroy() {
