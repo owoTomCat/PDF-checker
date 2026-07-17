@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   runAiAuditPipeline,
   type PipelineProgress,
@@ -178,11 +178,18 @@ function outcomeNotice(outcome: AuditOutcome, issueCount: number) {
 export function AuditConsole() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const fileCacheRef = useRef(new Map<string, File>());
-  const [tasks, setTasks] = useState<AuditTaskDetail[]>(readStoredTasks);
+  const [tasks, setTasks] = useState<AuditTaskDetail[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    const loadTimer = window.setTimeout(() => {
+      setTasks(readStoredTasks());
+    }, 0);
+    return () => window.clearTimeout(loadTimer);
+  }, []);
 
   const selectedTask = useMemo(
     () => tasks.find((task) => task.id === selectedId) ?? tasks[0] ?? null,

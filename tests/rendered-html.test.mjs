@@ -30,6 +30,15 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   assert.match(consoleSource, /外网溯源结果报告自动核验台/);
   assert.match(consoleSource, /runAiAuditPipeline/);
   assert.match(consoleSource, /localStorage/);
+  assert.match(consoleSource, /useState<AuditTaskDetail\[\]>\(\[\]\)/);
+  assert.match(
+    consoleSource,
+    /useEffect\(\(\) => \{\s*const loadTimer = window\.setTimeout\(\(\) => \{\s*setTasks\(readStoredTasks\(\)\);\s*\}, 0\);\s*return \(\) => window\.clearTimeout\(loadTimer\);\s*\}, \[\]\)/s,
+  );
+  assert.doesNotMatch(
+    consoleSource,
+    /useState<AuditTaskDetail\[\]>\(readStoredTasks\)/,
+  );
   assert.match(consoleSource, /qwen3\.7-plus/);
   assert.match(consoleSource, /定位用页面图/);
   assert.match(consoleSource, /阿里云百炼/);
