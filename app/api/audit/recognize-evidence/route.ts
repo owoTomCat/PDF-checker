@@ -39,8 +39,7 @@ export async function POST(request: Request) {
               region.addressBarRegionId !== null)) ||
           (region.type === "rights_screenshot" &&
             (region.rightsImageIndex === null ||
-              region.resultIndex === null ||
-              region.addressBarRegionId === null)),
+              region.resultIndex === null)),
       );
     if (invalidMetadata) {
       throw new RouteInputError(

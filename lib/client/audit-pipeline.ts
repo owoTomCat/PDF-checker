@@ -1,14 +1,30 @@
+import type { ZodType } from "zod";
 import {
-  ExtractApiResponseSchema,
-  FinalAuditResponseSchema,
+  AssociationApiResponseSchema,
+  EvidenceApiResponseSchema,
+  LayoutApiResponseSchema,
+  MAX_BATCH_IMAGE_BYTES,
   MAX_BATCH_PAGES,
   MAX_PDF_BYTES,
   MAX_PDF_PAGES,
-  type FinalAuditResponse,
-  type PageExtraction,
+  StrictFinalAuditResponseSchema,
+  StrictFinalizeRequestSchema,
+  TableApiResponseSchema,
+  UrlReviewApiResponseSchema,
+  type BoundingBox,
+  type LayoutRegion,
+  type StrictFinalAuditResponse,
+  type StrictFinalizeRequest,
 } from "../ai/contracts";
 
-export type PipelineStage = "rendering" | "extracting" | "finalizing";
+export type PipelineStage =
+  | "rendering"
+  | "locating"
+  | "recognizing"
+  | "reviewing_urls"
+  | "extracting_table"
+  | "associating"
+  | "finalizing";
 
 export type PipelineProgress = {
   stage: PipelineStage;
@@ -19,17 +35,19 @@ export type PipelineProgress = {
   batchCount: number;
 };
 
+export type RegionRenderOptions = {
+  dpi: number;
+  variant: "color" | "grayscale-contrast";
+  mimeType: "image/jpeg" | "image/png";
+};
+
 export type RenderedPdfDocument = {
   pageCount: number;
   renderPage: (pageNumber: number) => Promise<Blob>;
   renderRegion: (
     pageNumber: number,
-    bounds: import("../ai/contracts").BoundingBox,
-    options: {
-      dpi: number;
-      variant: "color" | "grayscale-contrast";
-      mimeType: "image/jpeg" | "image/png";
-    },
+    bounds: BoundingBox,
+    options: RegionRenderOptions,
   ) => Promise<Blob>;
   destroy: () => Promise<void>;
 };
@@ -39,6 +57,15 @@ type PipelineOptions = {
   openPdf?: (file: File) => Promise<RenderedPdfDocument>;
   onProgress?: (progress: PipelineProgress) => void;
 };
+
+type RenderedImage = {
+  blob: Blob;
+  fileName: string;
+};
+
+const EVIDENCE_DPI = 200;
+export const URL_REVIEW_DPI = 600;
+const URL_REVIEW_BATCH_PAIRS = 4;
 
 export function validatePdfFile(file: File) {
   const isPdf =
@@ -63,6 +90,42 @@ export function chunkPageNumbers(pageCount: number) {
       ),
     );
   }
+  return batches;
+}
+
+function chunkItems<T>(items: T[], maxCount: number) {
+  const batches: T[][] = [];
+  for (let start = 0; start < items.length; start += maxCount) {
+    batches.push(items.slice(start, start + maxCount));
+  }
+  return batches;
+}
+
+function splitRenderedByBytes<T extends { images: RenderedImage[] }>(
+  items: T[],
+  maxCount: number,
+) {
+  const batches: T[][] = [];
+  let current: T[] = [];
+  let currentBytes = 0;
+
+  for (const item of items) {
+    const itemBytes = item.images.reduce((sum, image) => sum + image.blob.size, 0);
+    if (itemBytes > MAX_BATCH_IMAGE_BYTES) {
+      throw new Error("单项复核素材超过 24 MiB 批次限制。");
+    }
+    if (
+      current.length > 0 &&
+      (current.length >= maxCount || currentBytes + itemBytes > MAX_BATCH_IMAGE_BYTES)
+    ) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(item);
+    currentBytes += itemBytes;
+  }
+  if (current.length > 0) batches.push(current);
   return batches;
 }
 
@@ -94,6 +157,28 @@ async function responseJson(response: Response) {
   return body;
 }
 
+async function parseResponse<T>(
+  response: Response,
+  schema: ZodType<T>,
+  incompleteMessage: string,
+) {
+  const parsed = schema.safeParse(await responseJson(response));
+  if (!parsed.success) throw new Error(incompleteMessage);
+  return parsed.data;
+}
+
+function imageForm(metadata: unknown, images: RenderedImage[]) {
+  const form = new FormData();
+  form.append("metadata", JSON.stringify(metadata));
+  for (const image of images) {
+    form.append(
+      "images",
+      new File([image.blob], image.fileName, { type: image.blob.type }),
+    );
+  }
+  return form;
+}
+
 function emitProgress(
   callback: PipelineOptions["onProgress"],
   progress: PipelineProgress,
@@ -101,10 +186,36 @@ function emitProgress(
   callback?.(progress);
 }
 
+function uniqueWarnings(warnings: string[]) {
+  return [...new Set(warnings.filter(Boolean))];
+}
+
+function compareRegions(left: LayoutRegion, right: LayoutRegion) {
+  return (
+    left.pageNumber - right.pageNumber ||
+    left.readingOrder - right.readingOrder ||
+    left.regionId.localeCompare(right.regionId)
+  );
+}
+
+function makeStageFailure(
+  code: string,
+  screenshot: { pageNumber: number; regionId: string },
+  message: string,
+): StrictFinalizeRequest["stageFailures"][number] {
+  return {
+    stage: "url_review",
+    code,
+    pageNumber: screenshot.pageNumber,
+    regionId: screenshot.regionId,
+    message,
+  };
+}
+
 export async function runAiAuditPipeline(
   file: File,
   options: PipelineOptions = {},
-): Promise<FinalAuditResponse> {
+): Promise<StrictFinalAuditResponse> {
   validatePdfFile(file);
   const fetchImpl = options.fetchImpl ?? fetch;
   const openPdf = options.openPdf ?? defaultOpenPdf;
@@ -114,93 +225,456 @@ export async function runAiAuditPipeline(
     if (pdf.pageCount > MAX_PDF_PAGES) {
       throw new Error(`PDF 超过 ${MAX_PDF_PAGES} 页限制。`);
     }
-    const batches = chunkPageNumbers(pdf.pageCount);
-    const extractedPages: PageExtraction[] = [];
-    let processedPages = 0;
 
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-      const pageNumbers = batches[batchIndex];
-      const rendered: Array<{ pageNumber: number; blob: Blob }> = [];
+    const layoutPages: StrictFinalizeRequest["layout"]["pages"] = [];
+    const layoutWarnings: string[] = [];
+    const stageFailures: StrictFinalizeRequest["stageFailures"] = [];
+    const pageBatches = chunkPageNumbers(pdf.pageCount);
+    let renderedPageCount = 0;
 
-      for (const pageNumber of pageNumbers) {
+    for (let batchIndex = 0; batchIndex < pageBatches.length; batchIndex += 1) {
+      const rendered = [] as Array<{
+        pageNumber: number;
+        images: RenderedImage[];
+      }>;
+      for (const pageNumber of pageBatches[batchIndex]) {
         emitProgress(options.onProgress, {
           stage: "rendering",
-          progress: Math.round(5 + (processedPages / pdf.pageCount) * 70),
-          processedPages,
+          progress: Math.round(2 + (renderedPageCount / pdf.pageCount) * 13),
+          processedPages: renderedPageCount,
           totalPages: pdf.pageCount,
           batchIndex: batchIndex + 1,
-          batchCount: batches.length,
+          batchCount: pageBatches.length,
         });
-        rendered.push({ pageNumber, blob: await pdf.renderPage(pageNumber) });
+        rendered.push({
+          pageNumber,
+          images: [
+            {
+              blob: await pdf.renderPage(pageNumber),
+              fileName: `page-${pageNumber}.jpg`,
+            },
+          ],
+        });
+        renderedPageCount += 1;
       }
 
-      emitProgress(options.onProgress, {
-        stage: "extracting",
-        progress: Math.round(10 + (processedPages / pdf.pageCount) * 70),
-        processedPages,
-        totalPages: pdf.pageCount,
-        batchIndex: batchIndex + 1,
-        batchCount: batches.length,
-      });
-      const form = new FormData();
-      form.append("fileName", file.name);
-      form.append("totalPages", String(pdf.pageCount));
-      form.append("pageNumbers", JSON.stringify(pageNumbers));
-      for (const page of rendered) {
-        form.append(
-          "pages",
-          new File([page.blob], `page-${page.pageNumber}.jpg`, {
-            type: "image/jpeg",
-          }),
+      for (const imageBatch of splitRenderedByBytes(rendered, MAX_BATCH_PAGES)) {
+        const pageNumbers = imageBatch.map((item) => item.pageNumber);
+        emitProgress(options.onProgress, {
+          stage: "locating",
+          progress: Math.round(15 + (renderedPageCount / pdf.pageCount) * 10),
+          processedPages: renderedPageCount,
+          totalPages: pdf.pageCount,
+          batchIndex: batchIndex + 1,
+          batchCount: pageBatches.length,
+        });
+        const response = await fetchImpl("/api/audit/layout", {
+          method: "POST",
+          body: imageForm(
+            { fileName: file.name, totalPages: pdf.pageCount, pageNumbers },
+            imageBatch.flatMap((item) => item.images),
+          ),
+        });
+        const output = await parseResponse(
+          response,
+          LayoutApiResponseSchema,
+          "页面区域定位响应不完整，请重新处理。",
         );
+        const returnedPages = new Set(output.pages.map((page) => page.pageNumber));
+        if (
+          returnedPages.size !== pageNumbers.length ||
+          pageNumbers.some((pageNumber) => !returnedPages.has(pageNumber))
+        ) {
+          throw new Error("页面区域定位结果缺少页面，请重新处理。");
+        }
+        layoutPages.push(...output.pages);
+        layoutWarnings.push(...output.warnings);
       }
-
-      const response = await fetchImpl("/api/audit/extract", {
-        method: "POST",
-        body: form,
-      });
-      const parsed = ExtractApiResponseSchema.safeParse(
-        await responseJson(response),
-      );
-      if (!parsed.success) {
-        throw new Error("页级模型响应不完整，请重新处理。");
-      }
-      const returnedPages = new Set(parsed.data.pages.map((page) => page.pageNumber));
-      if (
-        returnedPages.size !== pageNumbers.length ||
-        pageNumbers.some((page) => !returnedPages.has(page))
-      ) {
-        throw new Error("页级模型响应缺少页面，请重新处理。");
-      }
-      extractedPages.push(...parsed.data.pages);
-      processedPages += pageNumbers.length;
     }
 
-    extractedPages.sort((left, right) => left.pageNumber - right.pageNumber);
+    layoutPages.sort((left, right) => left.pageNumber - right.pageNumber);
+    const allRegions = layoutPages.flatMap((page) => page.regions).sort(compareRegions);
+    const regionById = new Map<string, LayoutRegion>();
+    for (const region of allRegions) {
+      if (regionById.has(region.regionId)) {
+        throw new Error("页面区域定位结果包含重复区域 ID，请重新处理。");
+      }
+      regionById.set(region.regionId, region);
+    }
+
+    const addressBarsByParent = new Map<string, LayoutRegion[]>();
+    for (const region of allRegions) {
+      if (region.type === "address_bar" && region.parentRegionId) {
+        const siblings = addressBarsByParent.get(region.parentRegionId) ?? [];
+        siblings.push(region);
+        addressBarsByParent.set(region.parentRegionId, siblings);
+      }
+    }
+    const selectedAddressBar = new Map<string, LayoutRegion | null>();
+    for (const screenshot of allRegions.filter(
+      (region) => region.type === "rights_screenshot",
+    )) {
+      const candidates = (addressBarsByParent.get(screenshot.regionId) ?? []).sort(
+        compareRegions,
+      );
+      selectedAddressBar.set(screenshot.regionId, candidates[0] ?? null);
+      if (candidates.length > 1) {
+        stageFailures.push(
+          makeStageFailure(
+            "ADDRESS_BAR_AMBIGUOUS",
+            screenshot,
+            "同一网页截图定位到多个地址栏区域，已使用阅读顺序最前的区域复核，仍需人工确认。",
+          ),
+        );
+      }
+    }
+
+    const evidenceCertificates: StrictFinalizeRequest["evidence"]["certificates"] = [];
+    const evidenceScreenshots: StrictFinalizeRequest["evidence"]["screenshots"] = [];
+    const evidenceWarnings: string[] = [];
+    const evidenceRegions = allRegions.filter(
+      (region) =>
+        region.type === "certificate" || region.type === "rights_screenshot",
+    );
+    const evidenceBatches = chunkItems(evidenceRegions, MAX_BATCH_PAGES);
+    if (evidenceBatches.length === 0) {
+      emitProgress(options.onProgress, {
+        stage: "recognizing",
+        progress: 35,
+        processedPages: pdf.pageCount,
+        totalPages: pdf.pageCount,
+        batchIndex: 0,
+        batchCount: 0,
+      });
+    }
+
+    for (let batchIndex = 0; batchIndex < evidenceBatches.length; batchIndex += 1) {
+      const rendered: Array<{ region: LayoutRegion; images: RenderedImage[] }> = [];
+      for (const region of evidenceBatches[batchIndex]) {
+        rendered.push({
+          region,
+          images: [
+            {
+              blob: await pdf.renderRegion(region.pageNumber, region.bounds, {
+                dpi: EVIDENCE_DPI,
+                variant: "color",
+                mimeType: "image/jpeg",
+              }),
+              fileName: `${region.regionId}.jpg`,
+            },
+          ],
+        });
+      }
+      for (const imageBatch of splitRenderedByBytes(rendered, MAX_BATCH_PAGES)) {
+        const regions = imageBatch.map(({ region }) => ({
+          regionId: region.regionId,
+          type: region.type as "certificate" | "rights_screenshot",
+          pageNumber: region.pageNumber,
+          rightsImageIndex: region.rightsImageIndex,
+          resultIndex: region.resultIndex,
+          addressBarRegionId:
+            region.type === "rights_screenshot"
+              ? (selectedAddressBar.get(region.regionId)?.regionId ?? null)
+              : null,
+          readingOrder: region.readingOrder,
+        }));
+        emitProgress(options.onProgress, {
+          stage: "recognizing",
+          progress: Math.round(27 + ((batchIndex + 1) / evidenceBatches.length) * 15),
+          processedPages: pdf.pageCount,
+          totalPages: pdf.pageCount,
+          batchIndex: batchIndex + 1,
+          batchCount: evidenceBatches.length,
+        });
+        const response = await fetchImpl("/api/audit/recognize-evidence", {
+          method: "POST",
+          body: imageForm(
+            { fileName: file.name, totalPages: pdf.pageCount, regions },
+            imageBatch.flatMap((item) => item.images),
+          ),
+        });
+        const output = await parseResponse(
+          response,
+          EvidenceApiResponseSchema,
+          "证书和网页截图识别响应不完整，请重新处理。",
+        );
+        evidenceCertificates.push(...output.certificates);
+        evidenceScreenshots.push(...output.screenshots);
+        evidenceWarnings.push(...output.warnings);
+      }
+    }
+
+    const urlReviews: StrictFinalizeRequest["urlReviews"]["reviews"] = [];
+    const urlWarnings: string[] = [];
+    const reviewableScreenshots: Array<{
+      screenshot: (typeof evidenceScreenshots)[number];
+      addressBar: LayoutRegion;
+    }> = [];
+    for (const screenshot of evidenceScreenshots) {
+      const addressBar = screenshot.addressBarRegionId
+        ? regionById.get(screenshot.addressBarRegionId)
+        : undefined;
+      if (
+        !addressBar ||
+        addressBar.type !== "address_bar" ||
+        addressBar.parentRegionId !== screenshot.regionId
+      ) {
+        stageFailures.push(
+          makeStageFailure(
+            "ADDRESS_BAR_MISSING",
+            screenshot,
+            "网页截图未定位到可独立复核的地址栏，发布网址未完整识别，需人工复核。",
+          ),
+        );
+        continue;
+      }
+      reviewableScreenshots.push({ screenshot, addressBar });
+    }
+
+    const urlBatches = chunkItems(reviewableScreenshots, URL_REVIEW_BATCH_PAIRS);
+    if (urlBatches.length === 0) {
+      emitProgress(options.onProgress, {
+        stage: "reviewing_urls",
+        progress: 52,
+        processedPages: pdf.pageCount,
+        totalPages: pdf.pageCount,
+        batchIndex: 0,
+        batchCount: 0,
+      });
+    }
+    for (let batchIndex = 0; batchIndex < urlBatches.length; batchIndex += 1) {
+      const rendered: Array<{
+        screenshot: (typeof evidenceScreenshots)[number];
+        addressBar: LayoutRegion;
+        images: RenderedImage[];
+      }> = [];
+      for (const { screenshot, addressBar } of urlBatches[batchIndex]) {
+        const color = await pdf.renderRegion(
+          addressBar.pageNumber,
+          addressBar.bounds,
+          {
+            dpi: URL_REVIEW_DPI,
+            variant: "color",
+            mimeType: "image/png",
+          },
+        );
+        const grayscale = await pdf.renderRegion(
+          addressBar.pageNumber,
+          addressBar.bounds,
+          {
+            dpi: URL_REVIEW_DPI,
+            variant: "grayscale-contrast",
+            mimeType: "image/png",
+          },
+        );
+        rendered.push({
+          screenshot,
+          addressBar,
+          images: [
+            {
+              blob: color,
+              fileName: `${screenshot.screenshotId}-color.png`,
+            },
+            {
+              blob: grayscale,
+              fileName: `${screenshot.screenshotId}-grayscale.png`,
+            },
+          ],
+        });
+      }
+      for (const imageBatch of splitRenderedByBytes(
+        rendered,
+        URL_REVIEW_BATCH_PAIRS,
+      )) {
+        const pairs = imageBatch.map(({ screenshot, addressBar }) => ({
+          screenshotId: screenshot.screenshotId,
+          pageNumber: screenshot.pageNumber,
+          addressBarRegionId: addressBar.regionId,
+        }));
+        emitProgress(options.onProgress, {
+          stage: "reviewing_urls",
+          progress: Math.round(43 + ((batchIndex + 1) / urlBatches.length) * 15),
+          processedPages: pdf.pageCount,
+          totalPages: pdf.pageCount,
+          batchIndex: batchIndex + 1,
+          batchCount: urlBatches.length,
+        });
+        const response = await fetchImpl("/api/audit/review-url", {
+          method: "POST",
+          body: imageForm(
+            { fileName: file.name, totalPages: pdf.pageCount, pairs },
+            imageBatch.flatMap((item) => item.images),
+          ),
+        });
+        const output = await parseResponse(
+          response,
+          UrlReviewApiResponseSchema,
+          "地址栏 URL 复核响应不完整，请重新处理。",
+        );
+        urlReviews.push(...output.reviews);
+        urlWarnings.push(...output.warnings);
+      }
+    }
+
+    const tableHeaders: StrictFinalizeRequest["table"]["headers"] = [];
+    const tableRows: StrictFinalizeRequest["table"]["rows"] = [];
+    const tableWarnings: string[] = [];
+    const tableRegions = allRegions.filter(
+      (region) => region.type === "summary_table",
+    );
+    const tableBatches = chunkItems(tableRegions, MAX_BATCH_PAGES);
+    if (tableBatches.length === 0) {
+      emitProgress(options.onProgress, {
+        stage: "extracting_table",
+        progress: 70,
+        processedPages: pdf.pageCount,
+        totalPages: pdf.pageCount,
+        batchIndex: 0,
+        batchCount: 0,
+      });
+    }
+    for (let batchIndex = 0; batchIndex < tableBatches.length; batchIndex += 1) {
+      const rendered: Array<{ region: LayoutRegion; images: RenderedImage[] }> = [];
+      for (const region of tableBatches[batchIndex]) {
+        rendered.push({
+          region,
+          images: [
+            {
+              blob: await pdf.renderRegion(region.pageNumber, region.bounds, {
+                dpi: EVIDENCE_DPI,
+                variant: "color",
+                mimeType: "image/jpeg",
+              }),
+              fileName: `${region.regionId}.jpg`,
+            },
+          ],
+        });
+      }
+      for (const imageBatch of splitRenderedByBytes(rendered, MAX_BATCH_PAGES)) {
+        const regions = imageBatch.map(({ region }) => ({
+          regionId: region.regionId,
+          pageNumber: region.pageNumber,
+          readingOrder: region.readingOrder,
+        }));
+        emitProgress(options.onProgress, {
+          stage: "extracting_table",
+          progress: Math.round(59 + ((batchIndex + 1) / tableBatches.length) * 15),
+          processedPages: pdf.pageCount,
+          totalPages: pdf.pageCount,
+          batchIndex: batchIndex + 1,
+          batchCount: tableBatches.length,
+        });
+        const response = await fetchImpl("/api/audit/extract-table", {
+          method: "POST",
+          body: imageForm(
+            { fileName: file.name, totalPages: pdf.pageCount, regions },
+            imageBatch.flatMap((item) => item.images),
+          ),
+        });
+        const output = await parseResponse(
+          response,
+          TableApiResponseSchema,
+          "汇总表提取响应不完整，请重新处理。",
+        );
+        tableHeaders.push(...output.headers);
+        tableRows.push(...output.rows);
+        tableWarnings.push(...output.warnings);
+      }
+    }
+
     emitProgress(options.onProgress, {
-      stage: "finalizing",
-      progress: 90,
+      stage: "associating",
+      progress: 82,
       processedPages: pdf.pageCount,
       totalPages: pdf.pageCount,
-      batchIndex: batches.length,
-      batchCount: batches.length,
+      batchIndex: 1,
+      batchCount: 1,
+    });
+    const screenshotLocators = evidenceScreenshots.map((screenshot) => ({
+      id: screenshot.screenshotId,
+      pageNumber: screenshot.pageNumber,
+      rightsImageIndex: screenshot.rightsImageIndex,
+      resultIndex: screenshot.resultIndex,
+      readingOrder: regionById.get(screenshot.regionId)?.readingOrder ?? 1,
+    }));
+    const tableRowLocators = tableRows.map((row) => ({
+      id: row.tableRowId,
+      pageNumber: row.pageNumber,
+      rightsImageIndex: row.rightsImageIndex,
+      resultIndex: row.resultIndex,
+      readingOrder: regionById.get(row.regionId)?.readingOrder ?? 1,
+    }));
+    let associations: StrictFinalizeRequest["associations"]["associations"] = [];
+    const associationWarnings: string[] = [];
+    if (screenshotLocators.length > 0) {
+      const response = await fetchImpl("/api/audit/associate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          screenshots: screenshotLocators,
+          tableRows: tableRowLocators,
+        }),
+      });
+      const output = await parseResponse(
+        response,
+        AssociationApiResponseSchema,
+        "网页截图与汇总表关联响应不完整，请重新处理。",
+      );
+      associations = output.associations;
+      associationWarnings.push(...output.warnings);
+    }
+
+    const warnings = uniqueWarnings([
+      ...layoutWarnings,
+      ...evidenceWarnings,
+      ...urlWarnings,
+      ...tableWarnings,
+      ...associationWarnings,
+    ]);
+    const finalInput = StrictFinalizeRequestSchema.parse({
+      fileName: file.name,
+      pageCount: pdf.pageCount,
+      layout: { pages: layoutPages, warnings: uniqueWarnings(layoutWarnings) },
+      evidence: {
+        certificates: evidenceCertificates,
+        screenshots: evidenceScreenshots,
+        warnings: uniqueWarnings(evidenceWarnings),
+      },
+      urlReviews: {
+        reviews: urlReviews,
+        warnings: uniqueWarnings(urlWarnings),
+      },
+      table: {
+        headers: tableHeaders,
+        rows: tableRows,
+        warnings: uniqueWarnings(tableWarnings),
+      },
+      associations: {
+        associations,
+        warnings: uniqueWarnings(associationWarnings),
+      },
+      warnings,
+      stageFailures,
+    });
+
+    emitProgress(options.onProgress, {
+      stage: "finalizing",
+      progress: 94,
+      processedPages: pdf.pageCount,
+      totalPages: pdf.pageCount,
+      batchIndex: 1,
+      batchCount: 1,
     });
     const finalResponse = await fetchImpl("/api/audit/finalize", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        fileName: file.name,
-        pageCount: pdf.pageCount,
-        pages: extractedPages,
-      }),
+      body: JSON.stringify(finalInput),
     });
-    const finalResult = FinalAuditResponseSchema.safeParse(
-      await responseJson(finalResponse),
+    return parseResponse(
+      finalResponse,
+      StrictFinalAuditResponseSchema,
+      "最终规则核验响应不完整，请重新处理或人工复核。",
     );
-    if (!finalResult.success) {
-      throw new Error("最终模型响应不完整，请重新处理或人工复核。");
-    }
-    return finalResult.data;
   } finally {
     await pdf.destroy().catch(() => undefined);
   }

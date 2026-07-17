@@ -190,6 +190,49 @@ test("URL review rejects an incomplete color and grayscale pair", async () => {
   assert.equal(body.error.code, "INVALID_INPUT");
 });
 
+test("evidence API accepts a screenshot when layout found no address bar", async () => {
+  const originalFetch = globalThis.fetch;
+  const evidenceWithoutAddress = {
+    ...strictEvidence,
+    certificates: [],
+    screenshots: strictEvidence.screenshots.map((screenshot) => ({
+      ...screenshot,
+      addressBarRegionId: null,
+    })),
+  };
+  globalThis.fetch = async () => modelResponse(evidenceWithoutAddress);
+
+  try {
+    const response = await recognizeEvidence(
+      multipartRequest(
+        "/api/audit/recognize-evidence",
+        {
+          fileName: "example.pdf",
+          totalPages: 1,
+          regions: [
+            {
+              regionId: "screenshot-1",
+              type: "rights_screenshot",
+              pageNumber: 1,
+              rightsImageIndex: 1,
+              resultIndex: 1,
+              addressBarRegionId: null,
+              readingOrder: 1,
+            },
+          ],
+        },
+        [jpeg()],
+      ),
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.screenshots[0].addressBarRegionId, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("all isolated image APIs return their validated stage output", async () => {
   const originalFetch = globalThis.fetch;
   const outputs = [
