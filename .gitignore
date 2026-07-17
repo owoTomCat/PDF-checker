@@ -42,6 +42,7 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/.worktrees/
 
 # local PDF samples
 /测试case/
