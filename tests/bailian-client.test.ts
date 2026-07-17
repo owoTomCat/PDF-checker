@@ -74,6 +74,7 @@ const evidenceInput = {
       pageNumber: 1,
       rightsImageIndex: 1,
       resultIndex: 1,
+      addressBarRegionId: "address-1",
       readingOrder: 1,
       dataUrl: cropDataUrl,
     },

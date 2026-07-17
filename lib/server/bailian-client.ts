@@ -62,6 +62,7 @@ const EvidenceModelInputSchema = z.strictObject({
         pageNumber,
         rightsImageIndex: z.number().int().min(1).max(10_000).nullable(),
         resultIndex: z.number().int().min(1).max(10_000).nullable(),
+        addressBarRegionId: z.string().min(1).max(100).nullable(),
         readingOrder: z.number().int().min(1).max(100_000),
         dataUrl,
       }),
