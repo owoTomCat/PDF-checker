@@ -31,9 +31,25 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   assert.match(consoleSource, /runAiAuditPipeline/);
   assert.match(consoleSource, /localStorage/);
   assert.match(consoleSource, /useState<AuditTaskDetail\[\]>\(\[\]\)/);
+  assert.match(consoleSource, /MAX_PARALLEL_TASKS\s*=\s*5/);
   assert.match(
     consoleSource,
-    /useEffect\(\(\) => \{\s*const loadTimer = window\.setTimeout\(\(\) => \{\s*setTasks\(readStoredTasks\(\)\);\s*\}, 0\);\s*return \(\) => window\.clearTimeout\(loadTimer\);\s*\}, \[\]\)/s,
+    /runWithConcurrency\(\s*queuedTasks,\s*MAX_PARALLEL_TASKS/,
+  );
+  assert.match(
+    consoleSource,
+    /setTasks\(\(current\)\s*=>\s*upsertHistoryTask\(current, task\)\)/,
+  );
+  assert.match(
+    consoleSource,
+    /const \[historyReady, setHistoryReady\] = useState\(false\)/,
+  );
+  assert.match(consoleSource, /if \(!historyReady\) return/);
+  assert.match(consoleSource, /writeStoredTasks\(tasks\)/);
+  assert.doesNotMatch(consoleSource, /for \(const task of queuedTasks\)/);
+  assert.match(
+    consoleSource,
+    /useEffect\(\(\) => \{\s*const loadTimer = window\.setTimeout\(\(\) => \{\s*setTasks\(readStoredTasks\(\)\);\s*setHistoryReady\(true\);\s*\}, 0\);\s*return \(\) => window\.clearTimeout\(loadTimer\);\s*\}, \[\]\)/s,
   );
   assert.doesNotMatch(
     consoleSource,

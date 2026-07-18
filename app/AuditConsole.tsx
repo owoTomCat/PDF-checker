@@ -5,6 +5,8 @@ import {
   runAiAuditPipeline,
   type PipelineProgress,
 } from "@/lib/client/audit-pipeline";
+import { runWithConcurrency } from "@/lib/client/concurrency";
+import { upsertHistoryTask } from "@/lib/client/task-history";
 import type {
   AuditOutcome,
   AuditTaskDetail,
@@ -12,6 +14,7 @@ import type {
 } from "@/lib/types";
 
 const STORAGE_KEY = "pdf-audit-workspace.tasks.v4";
+const MAX_PARALLEL_TASKS = 5;
 const ACTIVE_STATUSES = new Set<TaskStatus>([
   "queued",
   "rendering",
@@ -126,15 +129,6 @@ function writeStoredTasks(tasks: AuditTaskDetail[]) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks.slice(0, 80)));
 }
 
-function saveTask(task: AuditTaskDetail) {
-  const current = readStoredTasks();
-  const next = [task, ...current.filter((item) => item.id !== task.id)]
-    .sort((left, right) => +new Date(right.createdAt) - +new Date(left.createdAt))
-    .slice(0, 80);
-  writeStoredTasks(next);
-  return next;
-}
-
 function createQueuedTask(file: File): AuditTaskDetail {
   const now = new Date().toISOString();
   return {
@@ -179,6 +173,7 @@ export function AuditConsole() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const fileCacheRef = useRef(new Map<string, File>());
   const [tasks, setTasks] = useState<AuditTaskDetail[]>([]);
+  const [historyReady, setHistoryReady] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -187,9 +182,19 @@ export function AuditConsole() {
   useEffect(() => {
     const loadTimer = window.setTimeout(() => {
       setTasks(readStoredTasks());
+      setHistoryReady(true);
     }, 0);
     return () => window.clearTimeout(loadTimer);
   }, []);
+
+  useEffect(() => {
+    if (!historyReady) return;
+    try {
+      writeStoredTasks(tasks);
+    } catch {
+      setNotice("历史记录未能保存到浏览器。");
+    }
+  }, [historyReady, tasks]);
 
   const selectedTask = useMemo(
     () => tasks.find((task) => task.id === selectedId) ?? tasks[0] ?? null,
@@ -197,8 +202,7 @@ export function AuditConsole() {
   );
 
   const updateTask = useCallback((task: AuditTaskDetail) => {
-    setTasks(saveTask(task));
-    setSelectedId(task.id);
+    setTasks((current) => upsertHistoryTask(current, task));
   }, []);
 
   const processTask = useCallback(
@@ -281,7 +285,7 @@ export function AuditConsole() {
 
       setBusy(true);
       setNotice(
-        `已接收 ${files.length} 个 PDF，将逐个渲染页面并交给 qwen3.7-plus 识别。`,
+        `已接收 ${files.length} 个 PDF，最多同时处理 ${MAX_PARALLEL_TASKS} 个。`,
       );
       try {
         const queuedTasks = files.map((file) => {
@@ -290,10 +294,15 @@ export function AuditConsole() {
           updateTask(task);
           return task;
         });
-        for (const task of queuedTasks) {
-          const file = fileCacheRef.current.get(task.id);
-          if (file) await processTask(task, file);
-        }
+        setSelectedId(queuedTasks[0]?.id ?? null);
+        await runWithConcurrency(
+          queuedTasks,
+          MAX_PARALLEL_TASKS,
+          async (task) => {
+            const file = fileCacheRef.current.get(task.id);
+            if (file) await processTask(task, file);
+          },
+        );
       } finally {
         setBusy(false);
         if (inputRef.current) inputRef.current.value = "";
