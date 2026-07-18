@@ -47,6 +47,23 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   assert.match(consoleSource, /if \(!historyReady\) return/);
   assert.match(consoleSource, /writeStoredTasks\(tasks\)/);
   assert.doesNotMatch(consoleSource, /for \(const task of queuedTasks\)/);
+  for (const copy of [
+    "搜索任务名称",
+    "时间范围",
+    "全选当前结果",
+    "批量删除",
+    "删除任务",
+  ]) {
+    assert.match(consoleSource, new RegExp(copy));
+  }
+  assert.match(consoleSource, /filterHistoryTasks\(/);
+  assert.match(consoleSource, /removeHistoryTasks\(/);
+  assert.match(consoleSource, /className="task-open"/);
+  assert.match(consoleSource, /className="task-delete"/);
+  assert.doesNotMatch(
+    consoleSource,
+    /<button[\s\S]{0,160}className=\{`task-row/,
+  );
   assert.match(
     consoleSource,
     /useEffect\(\(\) => \{\s*const loadTimer = window\.setTimeout\(\(\) => \{\s*setTasks\(readStoredTasks\(\)\);\s*setHistoryReady\(true\);\s*\}, 0\);\s*return \(\) => window\.clearTimeout\(loadTimer\);\s*\}, \[\]\)/s,

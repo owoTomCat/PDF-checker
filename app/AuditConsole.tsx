@@ -6,7 +6,12 @@ import {
   type PipelineProgress,
 } from "@/lib/client/audit-pipeline";
 import { runWithConcurrency } from "@/lib/client/concurrency";
-import { upsertHistoryTask } from "@/lib/client/task-history";
+import {
+  filterHistoryTasks,
+  removeHistoryTasks,
+  upsertHistoryTask,
+  type HistoryDateFilter,
+} from "@/lib/client/task-history";
 import type {
   AuditOutcome,
   AuditTaskDetail,
@@ -178,6 +183,14 @@ export function AuditConsole() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyDateFilter, setHistoryDateFilter] =
+    useState<HistoryDateFilter>("all");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [checkedTaskIds, setCheckedTaskIds] = useState<Set<string>>(
+    new Set(),
+  );
 
   useEffect(() => {
     const loadTimer = window.setTimeout(() => {
@@ -189,17 +202,59 @@ export function AuditConsole() {
 
   useEffect(() => {
     if (!historyReady) return;
+    let errorTimer: number | null = null;
     try {
       writeStoredTasks(tasks);
     } catch {
-      setNotice("历史记录未能保存到浏览器。");
+      errorTimer = window.setTimeout(
+        () => setNotice("历史记录未能保存到浏览器。"),
+        0,
+      );
     }
+    return () => {
+      if (errorTimer !== null) window.clearTimeout(errorTimer);
+    };
   }, [historyReady, tasks]);
 
-  const selectedTask = useMemo(
-    () => tasks.find((task) => task.id === selectedId) ?? tasks[0] ?? null,
-    [selectedId, tasks],
+  const filteredTasks = useMemo(
+    () =>
+      filterHistoryTasks(tasks, {
+        query: historyQuery,
+        dateFilter: historyDateFilter,
+        customStart,
+        customEnd,
+      }),
+    [customEnd, customStart, historyDateFilter, historyQuery, tasks],
   );
+
+  const selectedTask = useMemo(
+    () =>
+      filteredTasks.find((task) => task.id === selectedId) ??
+      filteredTasks[0] ??
+      null,
+    [filteredTasks, selectedId],
+  );
+
+  const selectableFilteredIds = useMemo(
+    () =>
+      filteredTasks
+        .filter((task) => !ACTIVE_STATUSES.has(task.status))
+        .map((task) => task.id),
+    [filteredTasks],
+  );
+
+  const checkedDeletableIds = useMemo(
+    () =>
+      [...checkedTaskIds].filter((id) => {
+        const task = tasks.find((item) => item.id === id);
+        return task && !ACTIVE_STATUSES.has(task.status);
+      }),
+    [checkedTaskIds, tasks],
+  );
+
+  const allFilteredChecked =
+    selectableFilteredIds.length > 0 &&
+    selectableFilteredIds.every((id) => checkedTaskIds.has(id));
 
   const updateTask = useCallback((task: AuditTaskDetail) => {
     setTasks((current) => upsertHistoryTask(current, task));
@@ -324,6 +379,50 @@ export function AuditConsole() {
     [processTask, tasks],
   );
 
+  const toggleAllFilteredTasks = useCallback(() => {
+    setCheckedTaskIds((current) => {
+      const next = new Set(current);
+      if (allFilteredChecked) {
+        selectableFilteredIds.forEach((id) => next.delete(id));
+      } else {
+        selectableFilteredIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }, [allFilteredChecked, selectableFilteredIds]);
+
+  const deleteTaskIds = useCallback(
+    (requestedIds: ReadonlySet<string>, confirmation: string) => {
+      const deletableIds = new Set(
+        tasks
+          .filter(
+            (task) =>
+              requestedIds.has(task.id) &&
+              !ACTIVE_STATUSES.has(task.status),
+          )
+          .map((task) => task.id),
+      );
+      if (deletableIds.size === 0) {
+        setNotice("处理中任务不能删除。");
+        return;
+      }
+      if (!window.confirm(confirmation)) return;
+
+      deletableIds.forEach((id) => fileCacheRef.current.delete(id));
+      setTasks((current) => removeHistoryTasks(current, deletableIds));
+      setCheckedTaskIds((current) => {
+        const next = new Set(current);
+        deletableIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      setSelectedId((current) =>
+        current && deletableIds.has(current) ? null : current,
+      );
+      setNotice(`已删除 ${deletableIds.size} 条历史任务。`);
+    },
+    [tasks],
+  );
+
   const activeCount = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)).length;
   const reviewCount = tasks.filter(
     (task) => task.outcome === "needs_review",
@@ -423,37 +522,175 @@ export function AuditConsole() {
             <button
               type="button"
               className="ghost"
-              onClick={() => setTasks(readStoredTasks())}
+              onClick={() => {
+                setTasks(readStoredTasks());
+                setCheckedTaskIds(new Set());
+              }}
             >
               刷新
             </button>
           </div>
 
+          <div className="history-controls">
+            <label className="history-search">
+              <span>搜索任务名称</span>
+              <input
+                type="search"
+                value={historyQuery}
+                placeholder="输入 PDF 名称"
+                onChange={(event) => {
+                  setHistoryQuery(event.currentTarget.value);
+                  setCheckedTaskIds(new Set());
+                }}
+              />
+            </label>
+            <div className="history-date-controls">
+              <label>
+                <span>时间范围</span>
+                <select
+                  aria-label="时间范围"
+                  value={historyDateFilter}
+                  onChange={(event) => {
+                    setHistoryDateFilter(
+                      event.currentTarget.value as HistoryDateFilter,
+                    );
+                    setCheckedTaskIds(new Set());
+                  }}
+                >
+                  <option value="all">全部时间</option>
+                  <option value="today">今天</option>
+                  <option value="7d">最近 7 天</option>
+                  <option value="30d">最近 30 天</option>
+                  <option value="custom">自定义日期</option>
+                </select>
+              </label>
+              {historyDateFilter === "custom" ? (
+                <>
+                  <label>
+                    <span>开始日期</span>
+                    <input
+                      type="date"
+                      value={customStart}
+                      onChange={(event) => {
+                        setCustomStart(event.currentTarget.value);
+                        setCheckedTaskIds(new Set());
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>结束日期</span>
+                    <input
+                      type="date"
+                      value={customEnd}
+                      onChange={(event) => {
+                        setCustomEnd(event.currentTarget.value);
+                        setCheckedTaskIds(new Set());
+                      }}
+                    />
+                  </label>
+                </>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="history-batch-bar">
+            <span>
+              显示 {filteredTasks.length} / {tasks.length} 条
+            </span>
+            <div className="history-batch-actions">
+              <button
+                type="button"
+                className="ghost"
+                disabled={selectableFilteredIds.length === 0}
+                onClick={toggleAllFilteredTasks}
+              >
+                {allFilteredChecked ? "取消全选" : "全选当前结果"}
+              </button>
+              <button
+                type="button"
+                className="danger-action"
+                disabled={checkedDeletableIds.length === 0}
+                onClick={() =>
+                  deleteTaskIds(
+                    new Set(checkedDeletableIds),
+                    `确定删除选中的 ${checkedDeletableIds.length} 条历史任务吗？此操作无法撤销。`,
+                  )
+                }
+              >
+                批量删除
+                {checkedDeletableIds.length > 0
+                  ? `（${checkedDeletableIds.length}）`
+                  : ""}
+              </button>
+            </div>
+          </div>
+
           <div className="task-list">
             {tasks.length === 0 ? (
               <div className="empty">还没有任务。上传 PDF 后会显示在这里。</div>
+            ) : filteredTasks.length === 0 ? (
+              <div className="empty">没有符合条件的历史任务。</div>
             ) : (
-              tasks.map((task) => (
-                <button
-                  type="button"
+              filteredTasks.map((task) => (
+                <div
                   key={task.id}
                   className={`task-row ${task.id === selectedTask?.id ? "selected" : ""}`}
-                  onClick={() => setSelectedId(task.id)}
                 >
-                  <span className={`status-dot ${task.status}`} />
-                  <span className="task-main">
-                    <strong>{task.fileName}</strong>
-                    <small>
-                      {formatBytes(task.fileSize)} · {formatTime(task.createdAt)}
-                    </small>
-                  </span>
-                  <span className="task-meta">
-                    {task.outcome
-                      ? outcomeCopy[task.outcome]
-                      : statusCopy[task.status]}
-                    {task.issueCount !== null ? ` · ${task.issueCount} 项` : ""}
-                  </span>
-                </button>
+                  <input
+                    className="task-check"
+                    type="checkbox"
+                    aria-label={`选择任务：${task.fileName}`}
+                    checked={checkedTaskIds.has(task.id)}
+                    disabled={ACTIVE_STATUSES.has(task.status)}
+                    onChange={(event) => {
+                      const checked = event.currentTarget.checked;
+                      setCheckedTaskIds((current) => {
+                        const next = new Set(current);
+                        if (checked) next.add(task.id);
+                        else next.delete(task.id);
+                        return next;
+                      });
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="task-open"
+                    aria-current={
+                      task.id === selectedTask?.id ? "true" : undefined
+                    }
+                    onClick={() => setSelectedId(task.id)}
+                  >
+                    <span className={`status-dot ${task.status}`} />
+                    <span className="task-main">
+                      <strong>{task.fileName}</strong>
+                      <small>
+                        {formatBytes(task.fileSize)} · {formatTime(task.createdAt)}
+                      </small>
+                    </span>
+                    <span className="task-meta">
+                      {task.outcome
+                        ? outcomeCopy[task.outcome]
+                        : statusCopy[task.status]}
+                      {task.issueCount !== null
+                        ? ` · ${task.issueCount} 项`
+                        : ""}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="task-delete"
+                    aria-label={`删除任务：${task.fileName}`}
+                    disabled={ACTIVE_STATUSES.has(task.status)}
+                    onClick={() =>
+                      deleteTaskIds(
+                        new Set([task.id]),
+                        `确定删除任务“${task.fileName}”吗？此操作无法撤销。`,
+                      )
+                    }
+                  >
+                    删除任务
+                  </button>
+                </div>
               ))
             )}
           </div>

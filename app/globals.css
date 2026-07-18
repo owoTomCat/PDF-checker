@@ -38,7 +38,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -279,6 +280,90 @@ h3 {
   gap: 10px;
 }
 
+.history-controls {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.history-controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.history-controls label > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.history-controls input,
+.history-controls select {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: inherit;
+  min-width: 0;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.history-date-controls {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.history-date-controls label:first-child {
+  grid-column: 1 / -1;
+}
+
+.history-batch-bar {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.history-batch-bar > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.history-batch-actions button,
+.task-delete {
+  border: 0;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 8px 12px;
+}
+
+.danger-action,
+.task-delete {
+  background: #fff0ee;
+  color: var(--danger);
+}
+
+.danger-action:not(:disabled):hover,
+.task-delete:not(:disabled):hover {
+  background: #fbdad6;
+}
+
+.history-batch-actions button:disabled,
+.task-delete:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .task-row {
   align-items: center;
   background: rgba(255, 255, 255, 0.54);
@@ -287,8 +372,8 @@ h3 {
   color: inherit;
   display: grid;
   gap: 10px;
-  grid-template-columns: auto 1fr auto;
-  padding: 14px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 10px;
   text-align: left;
   width: 100%;
 }
@@ -297,6 +382,26 @@ h3 {
 .task-row:hover {
   border-color: rgba(23, 107, 77, 0.26);
   background: #fffdf8;
+}
+
+.task-check {
+  accent-color: var(--accent);
+  height: 16px;
+  width: 16px;
+}
+
+.task-open {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 4px;
+  text-align: left;
+  width: 100%;
 }
 
 .status-dot {
@@ -529,11 +634,32 @@ h3 {
     grid-template-columns: 1fr;
   }
 
-  .task-row {
-    grid-template-columns: auto 1fr;
+  .history-batch-bar {
+    align-items: stretch;
+    flex-direction: column;
   }
 
-  .task-meta {
+  .history-batch-actions {
+    justify-content: flex-start;
+  }
+
+  .history-date-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .history-date-controls label:first-child {
+    grid-column: auto;
+  }
+
+  .task-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .task-open {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .task-open .task-meta {
     grid-column: 2;
   }
 
