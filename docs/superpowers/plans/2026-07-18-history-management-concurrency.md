@@ -1,8 +1,8 @@
-# History Management and Five-Way Concurrency Implementation Plan
+# History Management and Three-Way Concurrency Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add searchable, time-filtered, individually and bulk-deletable browser history while processing at most five PDFs concurrently per upload batch.
+**Goal:** Add searchable, time-filtered, individually and bulk-deletable browser history while processing at most three PDFs concurrently per upload batch.
 
 **Architecture:** Move history collection operations and bounded concurrency into two pure client modules with direct Node tests. Keep `AuditConsole` responsible for browser persistence and UI state, but use functional task-state updates plus a post-hydration persistence effect so concurrent progress callbacks cannot overwrite each other.
 
@@ -14,7 +14,7 @@
 - Keep at most 80 persisted tasks sorted by descending `createdAt`.
 - Use task `createdAt` for all time filters; a custom end date includes the entire selected day.
 - Never delete tasks whose status is active.
-- Process at most 5 PDFs concurrently; extra PDFs remain queued and begin when a slot is free.
+- Process at most 3 PDFs concurrently; extra PDFs remain queued and begin when a slot is free.
 - One task failure must not stop the remaining batch.
 - Do not add server persistence, cancellation, new dependencies, or changes to the audit APIs.
 
@@ -303,14 +303,14 @@ git commit -m "feat: add bounded task concurrency"
 
 **Interfaces:**
 - Consumes: `runWithConcurrency()`, `upsertHistoryTask()`, existing `processTask()` and `readStoredTasks()`.
-- Produces: functional concurrent task updates and a five-slot upload batch.
+- Produces: functional concurrent task updates and a three-slot upload batch.
 
 - [ ] **Step 1: Add failing source integration assertions**
 
 Extend `tests/rendered-html.test.mjs` to assert:
 
 ```js
-assert.match(consoleSource, /MAX_PARALLEL_TASKS\s*=\s*5/);
+assert.match(consoleSource, /MAX_PARALLEL_TASKS\s*=\s*3/);
 assert.match(consoleSource, /runWithConcurrency\(queuedTasks, MAX_PARALLEL_TASKS/);
 assert.match(consoleSource, /setTasks\(\(current\)\s*=>\s*upsertHistoryTask\(current, task\)\)/);
 assert.doesNotMatch(consoleSource, /for \(const task of queuedTasks\)/);
@@ -339,7 +339,7 @@ Expected: FAIL because the console still contains the serial task loop and no co
 In `app/AuditConsole.tsx`:
 
 - import `runWithConcurrency` and `upsertHistoryTask`;
-- define `const MAX_PARALLEL_TASKS = 5`;
+- define `const MAX_PARALLEL_TASKS = 3`;
 - replace `saveTask()` usage with `setTasks((current) => upsertHistoryTask(current, task))`;
 - add `historyReady` state;
 - finish initial `readStoredTasks()` hydration before setting `historyReady`;
@@ -360,7 +360,7 @@ await runWithConcurrency(
 );
 ```
 
-Update the accepted-files notice to mention `最多同时处理 5 个`.
+Update the accepted-files notice to mention `最多同时处理 3 个`.
 
 - [ ] **Step 5: Run focused tests and verify GREEN**
 
@@ -477,7 +477,7 @@ git commit -m "feat: manage task history in bulk"
 - Modify only if an acceptance defect is reproduced with a failing test first.
 
 **Interfaces:**
-- Consumes: completed history UI, localStorage persistence, and five-slot worker pool.
+- Consumes: completed history UI, localStorage persistence, and three-slot worker pool.
 - Produces: verified local feature ready for branch integration.
 
 - [ ] **Step 1: Run static and full automated verification**
@@ -499,9 +499,9 @@ Run `npm run dev` at `http://localhost:3000`, confirm the page returns HTTP 200,
 
 Seed or create history with different names and dates. Confirm search, each preset, custom inclusive range, no-results copy, selection reset on filter change, select all current results, single deletion, bulk deletion, and persistence after refresh. Confirm active rows cannot be checked or deleted.
 
-- [ ] **Step 4: Verify five-way concurrency in the browser**
+- [ ] **Step 4: Verify three-way concurrency in the browser**
 
-Upload at least six small valid PDFs. Observe that five advance beyond `queued` before the sixth, no more than five model pipelines are active at once, and the sixth starts after a slot completes. Confirm a failed task does not block remaining queued tasks.
+Upload at least four small valid PDFs. Observe that three advance beyond `queued` before the fourth, no more than three model pipelines are active at once, and the fourth starts after a slot completes. Confirm a failed task does not block remaining queued tasks.
 
 - [ ] **Step 5: Inspect runtime evidence**
 

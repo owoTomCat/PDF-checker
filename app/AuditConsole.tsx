@@ -19,7 +19,7 @@ import type {
 } from "@/lib/types";
 
 const STORAGE_KEY = "pdf-audit-workspace.tasks.v4";
-const MAX_PARALLEL_TASKS = 5;
+const MAX_PARALLEL_TASKS = 3;
 const ACTIVE_STATUSES = new Set<TaskStatus>([
   "queued",
   "rendering",

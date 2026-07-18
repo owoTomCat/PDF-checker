@@ -31,7 +31,7 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   assert.match(consoleSource, /runAiAuditPipeline/);
   assert.match(consoleSource, /localStorage/);
   assert.match(consoleSource, /useState<AuditTaskDetail\[\]>\(\[\]\)/);
-  assert.match(consoleSource, /MAX_PARALLEL_TASKS\s*=\s*5/);
+  assert.match(consoleSource, /MAX_PARALLEL_TASKS\s*=\s*3/);
   assert.match(
     consoleSource,
     /runWithConcurrency\(\s*queuedTasks,\s*MAX_PARALLEL_TASKS/,
