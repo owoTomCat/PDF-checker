@@ -31,6 +31,28 @@ const layoutInput = {
   pages: [{ pageNumber: 1, dataUrl: pageDataUrl }],
 };
 
+const twoPageLayoutInput = {
+  ...layoutInput,
+  totalPages: 2,
+  pages: [
+    layoutInput.pages[0],
+    { pageNumber: 2, dataUrl: pageDataUrl },
+  ],
+};
+
+const completeTwoPageLayout = {
+  ...strictLayout,
+  pages: [
+    strictLayout.pages[0],
+    {
+      pageNumber: 2,
+      regions: [],
+      warnings: [],
+      confidence: 0.99,
+    },
+  ],
+};
+
 const evidenceInput = {
   fileName: "example.pdf",
   totalPages: 1,
@@ -191,6 +213,42 @@ test("adds a JSON correction prompt only after invalid model output", async () =
   assert.equal(bodies.length, 2);
   assert.doesNotMatch(bodies[0], /上一次响应未通过/);
   assert.match(bodies[1], /上一次响应未通过/);
+});
+
+test("retries a layout that omits one requested page", async () => {
+  const bodies: string[] = [];
+  const client = clientWithFetch(async (_url, init) => {
+    bodies.push(String(init?.body));
+    return modelResponse(
+      bodies.length === 1 ? strictLayout : completeTwoPageLayout,
+    );
+  });
+
+  const output = await client.locateRegions(twoPageLayoutInput);
+
+  assert.deepEqual(
+    output.pages.map((page) => page.pageNumber),
+    [1, 2],
+  );
+  assert.equal(bodies.length, 2);
+  assert.match(bodies[1], /\[1,2\]/);
+  assert.match(bodies[1], /regions/);
+});
+
+test("rejects a layout that still omits a requested page after correction", async () => {
+  let calls = 0;
+  const client = clientWithFetch(async () => {
+    calls += 1;
+    return modelResponse(strictLayout);
+  });
+
+  await assert.rejects(
+    client.locateRegions(twoPageLayoutInput),
+    (error: unknown) =>
+      error instanceof BailianClientError &&
+      error.code === "INVALID_MODEL_OUTPUT",
+  );
+  assert.equal(calls, 2);
 });
 
 test("retries a layout whose screenshot indices are incomplete", async () => {

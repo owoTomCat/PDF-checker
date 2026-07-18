@@ -44,6 +44,25 @@ const LayoutModelInputSchema = z.strictObject({
   pages: z.array(PageImageInputSchema).min(1).max(MAX_BATCH_PAGES),
 });
 
+function layoutBatchSchemaForPages(expectedPageNumbers: readonly number[]) {
+  const expected = [...expectedPageNumbers].sort((a, b) => a - b);
+  return LayoutBatchSchema.superRefine((batch, context) => {
+    const returned = batch.pages
+      .map((page) => page.pageNumber)
+      .sort((a, b) => a - b);
+    const isExactMatch =
+      expected.length === returned.length &&
+      expected.every((pageNumber, index) => pageNumber === returned[index]);
+    if (!isExactMatch) {
+      context.addIssue({
+        code: "custom",
+        path: ["pages"],
+        message: "\u9875\u9762\u5b9a\u4f4d\u7ed3\u679c\u5fc5\u987b\u5b8c\u6574\u8986\u76d6\u672c\u6279\u6b21\u8bf7\u6c42\u9875\u7801\u3002",
+      });
+    }
+  });
+}
+
 const EvidenceModelInputSchema = z.strictObject({
   fileName: z.string().min(1).max(255),
   totalPages: z.number().int().min(1).max(MAX_PDF_PAGES),
@@ -341,10 +360,18 @@ function parseModelContent<T>(rawEnvelope: string, schema: z.ZodType<T>): T {
   return parsedModelJson.data;
 }
 
-function withCorrectionPrompt(request: BailianChatRequest): BailianChatRequest {
+function withCorrectionPrompt(
+  request: BailianChatRequest,
+  correctionDetail?: string,
+): BailianChatRequest {
   const correction: TextContent = {
     type: "text",
-    text: "上一次响应未通过 JSON schema 校验。请严格按系统指定的 JSON 结构重新返回，不要增加字段。",
+    text: [
+      "上一次响应未通过 JSON schema 校验。请严格按系统指定的 JSON 结构重新返回，不要增加字段。",
+      correctionDetail,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join("\n"),
   };
   const messages = request.messages.map((message, index) => {
     if (index !== request.messages.length - 1 || message.role !== "user") {
@@ -387,6 +414,7 @@ export function createBailianClient(options: BailianClientOptions) {
   async function complete<T>(
     request: BailianChatRequest,
     schema: z.ZodType<T>,
+    correctionDetail?: string,
   ): Promise<T> {
     let activeRequest = request;
     let finalError: BailianClientError | null = null;
@@ -446,7 +474,7 @@ export function createBailianClient(options: BailianClientOptions) {
           normalizedError.retryable
         ) {
           if (normalizedError.code === "INVALID_MODEL_OUTPUT") {
-            activeRequest = withCorrectionPrompt(activeRequest);
+            activeRequest = withCorrectionPrompt(activeRequest, correctionDetail);
           }
           continue;
         }
@@ -467,7 +495,15 @@ export function createBailianClient(options: BailianClientOptions) {
 
   return {
     locateRegions(input: LayoutModelInput): Promise<LayoutBatch> {
-      return complete(buildLayoutRequest(input), LayoutBatchSchema);
+      const parsedInput = LayoutModelInputSchema.parse(input);
+      const expectedPageNumbers = parsedInput.pages.map(
+        (page) => page.pageNumber,
+      );
+      return complete(
+        buildLayoutRequest(parsedInput),
+        layoutBatchSchemaForPages(expectedPageNumbers),
+        `\u9875\u9762\u5b9a\u4f4d\u7ed3\u679c\u5fc5\u987b\u5305\u542b\u9875\u7801 ${JSON.stringify(expectedPageNumbers)}\uff0c\u6bcf\u9875\u6070\u597d\u8fd4\u56de\u4e00\u6b21\uff1b\u5373\u4f7f\u67d0\u9875\u6ca1\u6709\u76ee\u6807\u533a\u57df\uff0c\u4e5f\u5fc5\u987b\u8fd4\u56de\u8be5\u9875\u5e76\u5c06 regions \u8bbe\u7f6e\u4e3a\u7a7a\u6570\u7ec4\u3002`,
+      );
     },
     recognizeEvidence(input: EvidenceModelInput): Promise<EvidenceBatch> {
       return complete(buildEvidenceRequest(input), EvidenceBatchSchema);
