@@ -11,21 +11,14 @@ if (!action || !allowedActions.has(action) || process.argv.length !== 3) {
 }
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
-const executable = path.join(
+const cli = path.join(
   projectRoot,
   "node_modules",
-  ".bin",
-  process.platform === "win32" ? "vinext.cmd" : "vinext",
+  "vinext",
+  "dist",
+  "cli.js",
 );
-const command =
-  process.platform === "win32"
-    ? (process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe")
-    : executable;
-const commandArguments =
-  process.platform === "win32"
-    ? ["/d", "/s", "/c", `"${executable}" ${action}`]
-    : [action];
-const child = spawn(command, commandArguments, {
+const child = spawn(process.execPath, [cli, action], {
   cwd: projectRoot,
   env: {
     ...process.env,
@@ -33,7 +26,6 @@ const child = spawn(command, commandArguments, {
       process.env.WRANGLER_LOG_PATH ?? ".wrangler/wrangler.log",
   },
   stdio: "inherit",
-  windowsVerbatimArguments: process.platform === "win32",
 });
 
 child.once("error", (error) => {
