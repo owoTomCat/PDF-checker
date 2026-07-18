@@ -1,0 +1,20 @@
+[Unit]
+Description=PDF external-source audit workspace
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/pdf-checker/current
+Environment=NODE_ENV=production
+Environment=PORT=3000
+EnvironmentFile=/etc/pdf-checker.env
+ExecStart=/usr/local/bin/node scripts/run-vinext.mjs start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
