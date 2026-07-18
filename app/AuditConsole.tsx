@@ -6,6 +6,7 @@ import {
   type PipelineProgress,
 } from "@/lib/client/audit-pipeline";
 import { runWithConcurrency } from "@/lib/client/concurrency";
+import { createTaskId } from "@/lib/client/task-id";
 import {
   filterHistoryTasks,
   removeHistoryTasks,
@@ -137,7 +138,7 @@ function writeStoredTasks(tasks: AuditTaskDetail[]) {
 function createQueuedTask(file: File): AuditTaskDetail {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: createTaskId(),
     fileName: file.name,
     fileSize: file.size,
     fileType: file.type || "application/pdf",
