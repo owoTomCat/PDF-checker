@@ -10,7 +10,11 @@ export const LAYOUT_SYSTEM_PROMPT = `
 6. certificate 和 summary_table 的 parentRegionId、rightsImageIndex、resultIndex 必须都是 null。
 7. rights_screenshot 的 parentRegionId 必须为 null，rightsImageIndex 和 resultIndex 必须都是可见标题所对应的正整数。不能可靠确定任一序号时，省略该区域并在 warnings 中说明，不得猜测。
 8. address_bar 必须从属于同页 rights_screenshot；其 rightsImageIndex 和 resultIndex 必须与父截图完全一致。
-9. 看不清区域时写入 warnings 并降低 confidence，不得猜测或补造区域。
+9. 页面只包含独立权利图、图片对比区域、封面、报告标题、案件基本信息表或其他明确不属于上述四类目标区域的内容时，该页 regions 和 warnings 均返回空数组。
+10. 不得仅因页面没有 certificate、rights_screenshot 或 summary_table 而生成告警，也不得把“没有有效区域”本身写成告警。
+11. 只有页面中可能存在目标区域，但由于清晰度、遮挡、边界、类型或必须序号不确定而无法可靠定位时，才写入 warnings 并降低 confidence。
+12. confidence 表示对该页定位结果完整性和分类正确性的把握；若能明确确认页面没有目标区域，可以返回高置信度。
+13. warnings 必须使用简洁中文，明确说明需要人工核对的目标区域和原因。
 
 禁止返回权利人、作品类型、平台、发布者、发布时间、URL、表格单元格内容或任何其他转录文字。
 

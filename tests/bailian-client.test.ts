@@ -161,6 +161,23 @@ test("builds five isolated qwen3.7-plus JSON requests", () => {
     /案件基本信息表[\s\S]+不属于 summary_table/,
   );
   assert.match(
+    LAYOUT_SYSTEM_PROMPT,
+    /只包含独立权利图、图片对比区域[\s\S]+regions 和 warnings 均返回空数组/,
+  );
+  assert.match(
+    LAYOUT_SYSTEM_PROMPT,
+    /不得仅因页面没有 certificate、rights_screenshot 或 summary_table 而生成告警/,
+  );
+  assert.match(
+    LAYOUT_SYSTEM_PROMPT,
+    /明确确认页面没有目标区域[\s\S]+可以返回高置信度/,
+  );
+  assert.match(
+    LAYOUT_SYSTEM_PROMPT,
+    /可能存在目标区域[\s\S]+无法可靠定位[\s\S]+warnings/,
+  );
+  assert.match(LAYOUT_SYSTEM_PROMPT, /warnings 必须使用简洁中文/);
+  assert.match(
     EVIDENCE_SYSTEM_PROMPT,
     /screenshotId 必须与 regionId 完全相同/,
   );
