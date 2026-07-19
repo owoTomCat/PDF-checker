@@ -162,11 +162,11 @@ test("builds five isolated qwen3.7-plus JSON requests", () => {
   );
   assert.match(
     LAYOUT_SYSTEM_PROMPT,
-    /只包含独立权利图、图片对比区域[\s\S]+regions 和 warnings 均返回空数组/,
+    /只包含独立权利图、图片对比区域、封面、报告标题、案件基本信息表或其他明确不属于上述四类目标区域的内容时，该页 regions 和 warnings 均返回空数组/,
   );
   assert.match(
     LAYOUT_SYSTEM_PROMPT,
-    /不得仅因页面没有 certificate、rights_screenshot 或 summary_table 而生成告警/,
+    /不得仅因页面没有 certificate、rights_screenshot 或 summary_table 而生成告警，也不得把“没有有效区域”本身写成告警/,
   );
   assert.match(
     LAYOUT_SYSTEM_PROMPT,
@@ -174,7 +174,7 @@ test("builds five isolated qwen3.7-plus JSON requests", () => {
   );
   assert.match(
     LAYOUT_SYSTEM_PROMPT,
-    /可能存在目标区域[\s\S]+无法可靠定位[\s\S]+warnings/,
+    /可能存在目标区域，但由于清晰度、遮挡、边界、类型或必须序号不确定而无法可靠定位时，才写入 warnings 并降低 confidence/,
   );
   assert.match(LAYOUT_SYSTEM_PROMPT, /warnings 必须使用简洁中文/);
   assert.match(
