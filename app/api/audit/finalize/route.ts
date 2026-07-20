@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { StrictFinalizeRequestSchema } from "@/lib/ai/contracts";
-import { buildFinalAuditResult } from "@/lib/audit-result";
+import { createBailianAuditGateway } from "@/lib/server/bailian-audit-gateway";
+import { createBailianClientFromEnv } from "@/lib/server/bailian-client";
 import {
   modelRouteErrorResponse,
   parseJsonRequest,
@@ -16,7 +17,8 @@ export async function POST(request: Request) {
   try {
     assertModelRequestAllowed(request, modelRequestGuardOptionsFromEnv());
     const input = await parseJsonRequest(request, StrictFinalizeRequestSchema);
-    return NextResponse.json(buildFinalAuditResult(input));
+    const gateway = createBailianAuditGateway(createBailianClientFromEnv());
+    return NextResponse.json(await gateway.finalize(input));
   } catch (error) {
     return modelRouteErrorResponse(error, "汇总核验失败，请稍后重试。");
   }

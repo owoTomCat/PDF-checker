@@ -37,15 +37,7 @@ function isPng(bytes: Uint8Array) {
   );
 }
 
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 8_192) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 8_192));
-  }
-  return btoa(binary);
-}
-
-async function imageFileToDataUrl(file: File) {
+async function validateImageFile(file: File) {
   if (file.size === 0 || file.size > MAX_PAGE_IMAGE_BYTES) {
     throw new RouteInputError(
       "IMAGE_TOO_LARGE",
@@ -72,7 +64,7 @@ async function imageFileToDataUrl(file: File) {
       "图片内容与声明格式不一致。",
     );
   }
-  return `data:${file.type};base64,${bytesToBase64(bytes)}`;
+  return file;
 }
 
 function assertDeclaredBodyWithinLimit(request: Request, maxBytes: number) {
@@ -150,7 +142,10 @@ export async function parseImageBatchRequest<T>(
 
   return {
     metadata: parsedMetadata.data,
-    dataUrls: await Promise.all(files.map(imageFileToDataUrl)),
+    images: (await Promise.all(files.map(validateImageFile))).map((file) => ({
+      blob: file,
+      fileName: file.name,
+    })),
   };
 }
 

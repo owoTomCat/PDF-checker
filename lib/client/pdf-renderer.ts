@@ -1,6 +1,6 @@
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type { BoundingBox } from "../ai/contracts";
-import type { RenderedPdfDocument } from "./audit-pipeline";
+import type { RenderedPdfDocument } from "../audit/gateway";
 import {
   applyGrayscaleContrast,
   assertRenderBlobSize,

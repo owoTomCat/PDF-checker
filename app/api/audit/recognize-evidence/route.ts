@@ -1,12 +1,7 @@
 import { NextResponse } from "next/server";
-import {
-  EvidenceApiResponseSchema,
-  EvidenceRequestMetadataSchema,
-} from "@/lib/ai/contracts";
-import {
-  BailianClientError,
-  createBailianClientFromEnv,
-} from "@/lib/server/bailian-client";
+import { EvidenceRequestMetadataSchema } from "@/lib/ai/contracts";
+import { createBailianAuditGateway } from "@/lib/server/bailian-audit-gateway";
+import { createBailianClientFromEnv } from "@/lib/server/bailian-client";
 import {
   RouteInputError,
   modelRouteErrorResponse,
@@ -22,7 +17,7 @@ export const runtime = "edge";
 export async function POST(request: Request) {
   try {
     assertModelRequestAllowed(request, modelRequestGuardOptionsFromEnv());
-    const { metadata, dataUrls } = await parseImageBatchRequest(
+    const { metadata, images } = await parseImageBatchRequest(
       request,
       EvidenceRequestMetadataSchema,
       (value) => value.regions.length,
@@ -49,69 +44,8 @@ export async function POST(request: Request) {
       );
     }
 
-    const output = await createBailianClientFromEnv().recognizeEvidence({
-      fileName: metadata.fileName,
-      totalPages: metadata.totalPages,
-      regions: metadata.regions.map((region, index) => ({
-        ...region,
-        dataUrl: dataUrls[index],
-      })),
-    });
-
-    const normalizedOutput = {
-      ...output,
-      screenshots: output.screenshots.map((item) => ({
-        ...item,
-        screenshotId: item.regionId,
-      })),
-    };
-    const certificateIds = new Set(
-      metadata.regions
-        .filter((region) => region.type === "certificate")
-        .map((region) => region.regionId),
-    );
-    const screenshotMetadata = new Map(
-      metadata.regions
-        .filter((region) => region.type === "rights_screenshot")
-        .map((region) => [region.regionId, region]),
-    );
-    const returnedCertificateIds = new Set(
-      normalizedOutput.certificates.map((item) => item.regionId),
-    );
-    const returnedScreenshotIds = new Set(
-      normalizedOutput.screenshots.map((item) => item.regionId),
-    );
-    const invalidOutput =
-      returnedCertificateIds.size !== certificateIds.size ||
-      returnedScreenshotIds.size !== screenshotMetadata.size ||
-      [...certificateIds].some((id) => !returnedCertificateIds.has(id)) ||
-      [...screenshotMetadata.keys()].some(
-        (id) => !returnedScreenshotIds.has(id),
-      ) ||
-      normalizedOutput.screenshots.some((item) => {
-        const source = screenshotMetadata.get(item.regionId);
-        return (
-          !source ||
-          item.screenshotId !== item.regionId ||
-          item.pageNumber !== source.pageNumber ||
-          item.rightsImageIndex !== source.rightsImageIndex ||
-          item.resultIndex !== source.resultIndex ||
-          item.addressBarRegionId !== source.addressBarRegionId
-        );
-      });
-    if (invalidOutput) {
-      throw new BailianClientError(
-        "INVALID_MODEL_OUTPUT",
-        "模型返回的证书或截图识别结果与区域不匹配。",
-      );
-    }
-
-    return NextResponse.json(
-      EvidenceApiResponseSchema.parse({
-        model: "qwen3.7-plus",
-        ...normalizedOutput,
-      }),
-    );
+    const gateway = createBailianAuditGateway(createBailianClientFromEnv());
+    return NextResponse.json(await gateway.recognize(metadata, images));
   } catch (error) {
     return modelRouteErrorResponse(error, "证书和截图识别失败，请稍后重试。");
   }

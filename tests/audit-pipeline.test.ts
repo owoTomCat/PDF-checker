@@ -7,10 +7,13 @@ import {
 import { buildFinalAuditResult } from "../lib/audit-result";
 import {
   chunkPageNumbers,
-  runAiAuditPipeline,
+  runAuditPipeline,
   validatePdfFile,
+} from "../lib/audit/pipeline";
+import {
+  type AuditStageGateway,
   type RenderedPdfDocument,
-} from "../lib/client/audit-pipeline";
+} from "../lib/audit/gateway";
 import {
   strictAssociation,
   strictEvidence,
@@ -36,31 +39,6 @@ function png() {
     [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
     { type: "image/png" },
   );
-}
-
-function responseForStage(stage: string) {
-  switch (stage) {
-    case "/api/audit/layout":
-      return { model: "qwen3.7-plus", ...strictLayout, warnings: ["layout-warning"] };
-    case "/api/audit/recognize-evidence":
-      return {
-        model: "qwen3.7-plus",
-        ...strictEvidence,
-        warnings: ["evidence-warning"],
-      };
-    case "/api/audit/review-url":
-      return {
-        model: "qwen3.7-plus",
-        ...strictUrlReview,
-        warnings: ["url-warning"],
-      };
-    case "/api/audit/extract-table":
-      return { model: "qwen3.7-plus", ...strictTable, warnings: ["table-warning"] };
-    case "/api/audit/associate":
-      return { model: "qwen3.7-plus", ...strictAssociation };
-    default:
-      throw new Error(`unexpected stage: ${stage}`);
-  }
 }
 
 function regionTypeForBounds(bounds: { x: number; y: number; width: number; height: number }) {
@@ -117,59 +95,81 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
       destroyed = true;
     },
   };
-
-  const result = await runAiAuditPipeline(makePdfFile(), {
-    openPdf: async () => document,
-    onProgress(progress) {
-      progressStages.add(progress.stage);
+  const gateway: AuditStageGateway = {
+    async locate(metadata, images) {
+      calls.push("locate");
+      assert.deepEqual(metadata.pageNumbers, [1]);
+      assert.equal(images.length, 1);
+      return { model: "qwen3.7-plus", ...strictLayout, warnings: ["layout-warning"] };
     },
-    fetchImpl: async (url, init) => {
-      const stage = String(url);
-      calls.push(stage);
-      if (init?.body instanceof FormData) {
-        const files = init.body.getAll("images");
-        assert.equal(files.length > 0, true);
-        assert.equal(
-          files.some(
-            (value) => value instanceof File && value.type === "application/pdf",
-          ),
-          false,
-        );
-      }
-      if (stage === "/api/audit/associate") {
-        const body = JSON.parse(String(init?.body));
-        assert.deepEqual(Object.keys(body.screenshots[0]).sort(), [
-          "id",
-          "pageNumber",
-          "readingOrder",
-          "resultIndex",
-          "rightsImageIndex",
-        ]);
-      }
-      if (stage === "/api/audit/finalize") {
-        const parsedBody = JSON.parse(
-          String(init?.body),
-        ) as StrictFinalizeRequest;
-        finalBody = parsedBody;
-        return Response.json(buildFinalAuditResult(parsedBody));
-      }
-      return Response.json(responseForStage(stage));
+    async recognize(metadata, images) {
+      calls.push("recognize");
+      assert.equal(metadata.regions.length, 2);
+      assert.equal(images.length, 2);
+      return {
+        model: "qwen3.7-plus",
+        ...strictEvidence,
+        warnings: ["evidence-warning"],
+      };
+    },
+    async reviewUrls(metadata, images) {
+      calls.push("reviewUrls");
+      assert.equal(metadata.pairs.length, 1);
+      assert.equal(images.length, 2);
+      return {
+        model: "qwen3.7-plus",
+        ...strictUrlReview,
+        warnings: ["url-warning"],
+      };
+    },
+    async extractTable(metadata, images) {
+      calls.push("extractTable");
+      assert.equal(metadata.regions.length, 1);
+      assert.equal(images.length, 1);
+      return { model: "qwen3.7-plus", ...strictTable, warnings: ["table-warning"] };
+    },
+    async associate(input) {
+      calls.push("associate");
+      assert.deepEqual(Object.keys(input.screenshots[0]).sort(), [
+        "id",
+        "pageNumber",
+        "readingOrder",
+        "resultIndex",
+        "rightsImageIndex",
+      ]);
+      return { model: "qwen3.7-plus", ...strictAssociation };
+    },
+    async finalize(input) {
+      calls.push("finalize");
+      finalBody = input;
+      return buildFinalAuditResult(input);
+    },
+  };
+
+  const result = await runAuditPipeline({
+    fileName: "example.pdf",
+    fileSize: 16,
+    fileType: "application/pdf",
+    pdf: document,
+    gateway,
+    async onProgress(progress) {
+      progressStages.add(progress.stage);
     },
   });
 
   assert.deepEqual(calls, [
     "render:1",
-    "/api/audit/layout",
+    "locate",
     "crop:certificate:1",
     "crop:rights_screenshot:1",
-    "/api/audit/recognize-evidence",
+    "recognize",
     "crop:address_bar:color:600",
     "crop:address_bar:grayscale-contrast:600",
-    "/api/audit/review-url",
+    "reviewUrls",
     "crop:summary_table:1",
-    "/api/audit/extract-table",
-    "/api/audit/associate",
-    "/api/audit/finalize",
+    "extractTable",
+    "associate",
+    "finalize",
   ]);
   assert.deepEqual(finalBody?.warnings, [
     "layout-warning",
@@ -236,42 +236,47 @@ test("records a missing address bar without substituting the table URL", async (
     async destroy() {},
   };
 
-  const result = await runAiAuditPipeline(makePdfFile(), {
-    openPdf: async () => document,
-    fetchImpl: async (url, init) => {
-      const stage = String(url);
-      calls.push(stage);
-      if (stage === "/api/audit/layout") {
-        return Response.json({ model: "qwen3.7-plus", ...layoutWithoutAddress });
-      }
-      if (stage === "/api/audit/recognize-evidence") {
-        const metadata = JSON.parse(
-          String((init?.body as FormData).get("metadata")),
-        );
-        const screenshot = metadata.regions.find(
-          (region: { type: string }) => region.type === "rights_screenshot",
-        );
-        assert.equal(screenshot.addressBarRegionId, null);
-        return Response.json({ model: "qwen3.7-plus", ...evidenceWithoutAddress });
-      }
-      if (stage === "/api/audit/extract-table") {
-        return Response.json({ model: "qwen3.7-plus", ...strictTable });
-      }
-      if (stage === "/api/audit/associate") {
-        return Response.json({ model: "qwen3.7-plus", ...strictAssociation });
-      }
-      if (stage === "/api/audit/finalize") {
-        const parsedBody = JSON.parse(
-          String(init?.body),
-        ) as StrictFinalizeRequest;
-        finalBody = parsedBody;
-        return Response.json(buildFinalAuditResult(parsedBody));
-      }
-      throw new Error(`unexpected stage: ${stage}`);
+  const gateway: AuditStageGateway = {
+    async locate() {
+      calls.push("locate");
+      return { model: "qwen3.7-plus", ...layoutWithoutAddress };
     },
+    async recognize(metadata) {
+      calls.push("recognize");
+      const screenshot = metadata.regions.find(
+        (region) => region.type === "rights_screenshot",
+      );
+      assert.equal(screenshot?.addressBarRegionId, null);
+      return { model: "qwen3.7-plus", ...evidenceWithoutAddress };
+    },
+    async reviewUrls() {
+      calls.push("reviewUrls");
+      throw new Error("URL review should be skipped");
+    },
+    async extractTable() {
+      calls.push("extractTable");
+      return { model: "qwen3.7-plus", ...strictTable };
+    },
+    async associate() {
+      calls.push("associate");
+      return { model: "qwen3.7-plus", ...strictAssociation };
+    },
+    async finalize(input) {
+      calls.push("finalize");
+      finalBody = input;
+      return buildFinalAuditResult(input);
+    },
+  };
+
+  const result = await runAuditPipeline({
+    fileName: "example.pdf",
+    fileSize: 16,
+    fileType: "application/pdf",
+    pdf: document,
+    gateway,
   });
 
-  assert.equal(calls.includes("/api/audit/review-url"), false);
+  assert.equal(calls.includes("reviewUrls"), false);
   assert.deepEqual(finalBody?.urlReviews.reviews, []);
   assert.equal(finalBody?.stageFailures.length, 1);
   assert.equal(finalBody?.stageFailures[0].code, "ADDRESS_BAR_MISSING");
@@ -295,9 +300,12 @@ test("destroys the PDF document when its page count exceeds the limit", async ()
   };
 
   await assert.rejects(
-    runAiAuditPipeline(makePdfFile(), {
-      openPdf: async () => document,
-      fetchImpl: async () => Response.json({}),
+    runAuditPipeline({
+      fileName: "example.pdf",
+      fileSize: 16,
+      fileType: "application/pdf",
+      pdf: document,
+      gateway: {} as AuditStageGateway,
     }),
     /80 页/,
   );

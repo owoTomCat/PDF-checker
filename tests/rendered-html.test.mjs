@@ -10,7 +10,8 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
     page,
     layout,
     consoleSource,
-    pipelineSource,
+    clientPipelineSource,
+    auditPipelineSource,
     rendererSource,
     readme,
     specification,
@@ -19,6 +20,7 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/AuditConsole.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/client/audit-pipeline.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/audit/pipeline.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/client/pdf-renderer.ts", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../docs/spec-qwen-ai-pipeline.md", import.meta.url), "utf8"),
@@ -86,10 +88,20 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
     "extract-table",
     "associate",
   ]) {
-    assert.match(pipelineSource, new RegExp(`/api/audit/${endpoint}`));
+    assert.match(clientPipelineSource, new RegExp(`/api/audit/${endpoint}`));
   }
-  assert.match(pipelineSource, /\/api\/audit\/finalize/);
-  assert.doesNotMatch(pipelineSource, /\/api\/audit\/extract["']/);
+  assert.match(clientPipelineSource, /\/api\/audit\/finalize/);
+  assert.match(clientPipelineSource, /runAuditPipeline\(/);
+  assert.doesNotMatch(
+    clientPipelineSource,
+    /splitRenderedByBytes|stage:\s*"rendering"/,
+  );
+  assert.match(auditPipelineSource, /export async function runAuditPipeline/);
+  assert.doesNotMatch(
+    auditPipelineSource,
+    /\bfetch\b|\bwindow\b|defaultOpenPdf|pdf-renderer|FormData|new File/,
+  );
+  assert.doesNotMatch(clientPipelineSource, /\/api\/audit\/extract["']/);
   assert.match(readme, /截图裁剪看不到汇总表/);
   assert.match(readme, /600 DPI/);
   assert.match(readme, /彩色.*灰度|灰度.*彩色/s);
@@ -111,13 +123,11 @@ test("removes the disposable starter preview", async () => {
   );
 });
 
-test("removes the legacy local parser and D1/R2 task routes", async () => {
+test("removes the legacy local parser, storage adapter, and run route", async () => {
   const legacyPaths = [
     "../lib/pdf-text-extractor.ts",
     "../lib/audit-runner.ts",
     "../lib/server/storage.ts",
-    "../app/api/tasks/route.ts",
-    "../app/api/tasks/[id]/route.ts",
     "../app/api/tasks/[id]/run/route.ts",
   ];
 

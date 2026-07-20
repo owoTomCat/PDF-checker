@@ -1,12 +1,7 @@
 import { NextResponse } from "next/server";
-import {
-  LayoutApiResponseSchema,
-  LayoutRequestMetadataSchema,
-} from "@/lib/ai/contracts";
-import {
-  BailianClientError,
-  createBailianClientFromEnv,
-} from "@/lib/server/bailian-client";
+import { LayoutRequestMetadataSchema } from "@/lib/ai/contracts";
+import { createBailianAuditGateway } from "@/lib/server/bailian-audit-gateway";
+import { createBailianClientFromEnv } from "@/lib/server/bailian-client";
 import {
   RouteInputError,
   modelRouteErrorResponse,
@@ -22,7 +17,7 @@ export const runtime = "edge";
 export async function POST(request: Request) {
   try {
     assertModelRequestAllowed(request, modelRequestGuardOptionsFromEnv());
-    const { metadata, dataUrls } = await parseImageBatchRequest(
+    const { metadata, images } = await parseImageBatchRequest(
       request,
       LayoutRequestMetadataSchema,
       (value) => value.pageNumbers.length,
@@ -39,28 +34,8 @@ export async function POST(request: Request) {
       );
     }
 
-    const output = await createBailianClientFromEnv().locateRegions({
-      fileName: metadata.fileName,
-      totalPages: metadata.totalPages,
-      pages: dataUrls.map((imageDataUrl, index) => ({
-        pageNumber: metadata.pageNumbers[index],
-        dataUrl: imageDataUrl,
-      })),
-    });
-    const expectedPages = [...metadata.pageNumbers].sort((a, b) => a - b);
-    const returnedPages = output.pages
-      .map((page) => page.pageNumber)
-      .sort((a, b) => a - b);
-    if (JSON.stringify(expectedPages) !== JSON.stringify(returnedPages)) {
-      throw new BailianClientError(
-        "INVALID_MODEL_OUTPUT",
-        "模型返回的页面定位结果不完整，请重新处理。",
-      );
-    }
-
-    return NextResponse.json(
-      LayoutApiResponseSchema.parse({ model: "qwen3.7-plus", ...output }),
-    );
+    const gateway = createBailianAuditGateway(createBailianClientFromEnv());
+    return NextResponse.json(await gateway.locate(metadata, images));
   } catch (error) {
     return modelRouteErrorResponse(error, "页面区域定位失败，请稍后重试。");
   }
