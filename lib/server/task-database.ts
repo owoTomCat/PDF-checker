@@ -67,6 +67,20 @@ export function openTaskDatabase(dataDir: string): DatabaseSync {
         .prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)")
         .run(1, new Date().toISOString());
     }
+    const orphanClaimMigration = database
+      .prepare("SELECT version FROM schema_migrations WHERE version = ?")
+      .get(2);
+    if (!orphanClaimMigration) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS pdf_orphan_deletion_claims (
+          pdf_path TEXT PRIMARY KEY,
+          claimed_at TEXT NOT NULL
+        ) STRICT;
+      `);
+      database
+        .prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)")
+        .run(2, new Date().toISOString());
+    }
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");

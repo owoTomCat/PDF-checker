@@ -184,24 +184,35 @@ export class TaskRepository {
   constructor(private readonly db: DatabaseSync) {}
 
   create(input: CreateTaskInput): AuditTaskDetail {
-    this.db.prepare(`
-      INSERT INTO audit_tasks (
-        id, owner_email, file_name, file_size, file_type, pdf_path, pdf_expires_at,
-        status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-    `).run(
-      input.id,
-      input.ownerEmail,
-      input.fileName,
-      input.fileSize,
-      input.fileType,
-      input.pdfPath,
-      input.pdfExpiresAt,
-      input.now,
-      input.now,
-    );
-    const row = this.db.prepare("SELECT * FROM audit_tasks WHERE id = ?").get(input.id) as TaskRow;
-    return mapTaskDetail(row);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const claim = this.db.prepare(
+        "SELECT 1 FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
+      ).get(input.pdfPath);
+      if (claim) throw new Error("PDF storage is unavailable.");
+      this.db.prepare(`
+        INSERT INTO audit_tasks (
+          id, owner_email, file_name, file_size, file_type, pdf_path, pdf_expires_at,
+          status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+      `).run(
+        input.id,
+        input.ownerEmail,
+        input.fileName,
+        input.fileSize,
+        input.fileType,
+        input.pdfPath,
+        input.pdfExpiresAt,
+        input.now,
+        input.now,
+      );
+      const row = this.db.prepare("SELECT * FROM audit_tasks WHERE id = ?").get(input.id) as TaskRow;
+      this.db.exec("COMMIT");
+      return mapTaskDetail(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   list(ownerEmail: string, options: TaskListOptions): { items: AuditTaskSummary[]; nextCursor: string | null } {
@@ -426,12 +437,29 @@ export class TaskRepository {
     `).run(now, now, id, now));
   }
 
-  isPdfPathReferenced(pdfPath: string): boolean {
-    return this.db.prepare(`
-      SELECT 1 FROM audit_tasks
-      WHERE pdf_path = ? AND pdf_deleted_at IS NULL
-      LIMIT 1
-    `).get(pdfPath) !== undefined;
+  claimOrphanPdfDeletion(pdfPath: string, now: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const taskReference = this.db.prepare(
+        "SELECT 1 FROM audit_tasks WHERE pdf_path = ? LIMIT 1",
+      ).get(pdfPath);
+      const existingClaim = this.db.prepare(
+        "SELECT 1 FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
+      ).get(pdfPath);
+      if (taskReference || existingClaim) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      this.db.prepare(`
+        INSERT INTO pdf_orphan_deletion_claims (pdf_path, claimed_at)
+        VALUES (?, ?)
+      `).run(pdfPath, now);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 }
 

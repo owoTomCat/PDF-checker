@@ -15,6 +15,7 @@ import { openTaskDatabase } from "../lib/server/task-database";
 import { TaskRepository } from "../lib/server/task-repository";
 import {
   cleanupTaskFiles,
+  defaultTaskFileOperations,
   deleteTaskPdf,
   persistPdf,
   resolveTaskDataPaths,
@@ -72,6 +73,7 @@ test("cleanup removes expired terminal and stale unreferenced files without dele
   await writeFile(orphanPath, "%PDF-orphan", { mode: 0o600 });
   await writeFile(uploadingPath, "%PDF-uploading", { mode: 0o600 });
   const stale = new Date("2026-07-19T22:00:00.000Z");
+  await utimes(activePath, stale, stale);
   await utimes(orphanPath, stale, stale);
   await utimes(uploadingPath, stale, stale);
 
@@ -151,4 +153,120 @@ test("cleanup skips an expired task whose stored path is outside private storage
   await access(outsidePath);
   assert.equal(result.deletedTaskPdfs, 0);
   assert.equal(repository.findExpiredPdfTasks(cleanupNow).length, 1);
+});
+
+test("persistence rolls back before rename when private-file chmod fails", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-chmod-failure-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let chmodCalls = 0;
+  const operations = {
+    ...defaultTaskFileOperations,
+    chmod: async (target: string, mode: number) => {
+      chmodCalls += 1;
+      if (chmodCalls === 2) {
+        throw Object.assign(new Error(`chmod failed for ${target}`), { code: "EACCES" });
+      }
+      await defaultTaskFileOperations.chmod(target, mode);
+    },
+  };
+
+  await assert.rejects(
+    persistPdf({
+      dataDir: root,
+      taskId: terminalId,
+      bytes: new TextEncoder().encode("%PDF-failure"),
+      fileOperations: operations,
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "PDF_PERSIST_FAILED");
+      assert.doesNotMatch((error as Error).message, /chmod failed|uploads|[A-Fa-f0-9]{8}-/);
+      return true;
+    },
+  );
+
+  const { uploadDir } = resolveTaskDataPaths(root);
+  assert.equal(chmodCalls, 2);
+  await assert.rejects(access(path.join(uploadDir, `${terminalId}.pdf`)));
+  await assert.rejects(access(path.join(uploadDir, `${terminalId}.pdf.uploading`)));
+});
+
+test("cleanup treats a disappearing stale candidate as idempotent", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-stat-enoent-"));
+  const db = openTaskDatabase(root);
+  const repository = new TaskRepository(db);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { uploadDir } = resolveTaskDataPaths(root);
+  await defaultTaskFileOperations.mkdir(uploadDir, { recursive: true, mode: 0o700 });
+  const stalePath = path.join(uploadDir, `${orphanId}.uploading`);
+  await writeFile(stalePath, "%PDF-temp", { mode: 0o600 });
+  const stale = new Date("2026-07-19T22:00:00.000Z");
+  await utimes(stalePath, stale, stale);
+
+  const result = await cleanupTaskFiles({
+    repository,
+    dataDir: root,
+    now: cleanupNow,
+    fileOperations: {
+      ...defaultTaskFileOperations,
+      stat: async () => {
+        throw Object.assign(new Error("missing stale file"), { code: "ENOENT" });
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    deletedTaskPdfs: 0,
+    deletedOrphanPdfs: 0,
+    deletedUploadingFiles: 0,
+  });
+});
+
+test("storage setup and stale stat failures have path-free public errors", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-safe-errors-"));
+  const db = openTaskDatabase(root);
+  const repository = new TaskRepository(db);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(
+    persistPdf({
+      dataDir: root,
+      taskId: terminalId,
+      bytes: new TextEncoder().encode("%PDF-setup"),
+      fileOperations: {
+        ...defaultTaskFileOperations,
+        mkdir: async () => {
+          throw new Error("C:\\private\\uploads setup failed");
+        },
+      },
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "UPLOAD_DIRECTORY_SETUP_FAILED");
+      assert.doesNotMatch((error as Error).message, /private|uploads/i);
+      return true;
+    },
+  );
+
+  const { uploadDir } = resolveTaskDataPaths(root);
+  await defaultTaskFileOperations.mkdir(uploadDir, { recursive: true, mode: 0o700 });
+  const stalePath = path.join(uploadDir, `${orphanId}.uploading`);
+  await writeFile(stalePath, "%PDF-temp", { mode: 0o600 });
+  await assert.rejects(
+    cleanupTaskFiles({
+      repository,
+      dataDir: root,
+      now: cleanupNow,
+      fileOperations: {
+        ...defaultTaskFileOperations,
+        stat: async () => {
+          throw new Error(`failed stat ${stalePath}`);
+        },
+      },
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "UPLOAD_FILE_STAT_FAILED");
+      assert.doesNotMatch((error as Error).message, /stat|uploads|[A-Fa-f0-9]{8}-/i);
+      return true;
+    },
+  );
 });

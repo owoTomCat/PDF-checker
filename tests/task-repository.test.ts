@@ -201,3 +201,40 @@ test("expired PDFs are unavailable before cleanup runs", async (t) => {
 
   assert.equal(repository.getOwned("a@example.com", "expired-availability")?.pdfAvailable, false);
 });
+
+test("orphan deletion claims arbitrate atomically with task creation", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-orphan-claims-"));
+  const db = openTaskDatabase(root);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = new TaskRepository(db);
+  const createWinsPath = path.join(root, "uploads", "create-wins.pdf");
+  const claimWinsPath = path.join(root, "uploads", "claim-wins.pdf");
+  const now = "2026-07-20T00:00:00.000Z";
+
+  repository.create({
+    id: "create-wins",
+    ownerEmail: "a@example.com",
+    fileName: "original.pdf",
+    fileSize: 10,
+    fileType: "application/pdf",
+    pdfPath: createWinsPath,
+    pdfExpiresAt: "2026-07-23T00:00:00.000Z",
+    now,
+  });
+  assert.equal(repository.claimOrphanPdfDeletion(createWinsPath, now), false);
+
+  assert.equal(repository.claimOrphanPdfDeletion(claimWinsPath, now), true);
+  assert.equal(repository.claimOrphanPdfDeletion(claimWinsPath, now), false);
+  assert.throws(() => repository.create({
+    id: "claim-wins",
+    ownerEmail: "a@example.com",
+    fileName: "original.pdf",
+    fileSize: 10,
+    fileType: "application/pdf",
+    pdfPath: claimWinsPath,
+    pdfExpiresAt: "2026-07-23T00:00:00.000Z",
+    now,
+  }), /PDF storage is unavailable/);
+  assert.equal(repository.getOwned("a@example.com", "claim-wins"), null);
+});
