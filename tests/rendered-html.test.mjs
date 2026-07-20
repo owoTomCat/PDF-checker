@@ -144,8 +144,11 @@ test("uses a cross-platform vinext launcher", async () => {
   const packageJson = JSON.parse(packageSource);
 
   assert.equal(packageJson.scripts.dev, "node scripts/run-vinext.mjs dev");
-  assert.equal(packageJson.scripts.build, "node scripts/run-vinext.mjs build");
+  assert.equal(packageJson.scripts["build:web"], "node scripts/run-vinext.mjs build");
+  assert.equal(packageJson.scripts["build:worker"], "vite build --config vite.worker.config.ts");
+  assert.equal(packageJson.scripts.build, "npm run build:web && npm run build:worker");
   assert.equal(packageJson.scripts.start, "node scripts/run-vinext.mjs start");
+  assert.equal(packageJson.scripts["start:worker"], "node dist/audit-worker.mjs");
   assert.doesNotMatch(JSON.stringify(packageJson.scripts), /WRANGLER_LOG_PATH=/);
   assert.match(launcher, /process\.execPath/);
   assert.match(launcher, /"vinext",\s*"dist",\s*"cli\.js"/s);
