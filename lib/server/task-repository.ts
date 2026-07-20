@@ -92,9 +92,27 @@ export type CompleteTaskInput = {
 export type FailTaskInput = {
   id: string;
   errorCode: string;
-  errorMessage: string;
   now: string;
 };
+
+export const TASK_FAILURE_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  INVALID_PDF_UPLOAD: "The uploaded PDF is invalid.",
+  PDF_TOO_LARGE: "The PDF exceeds the supported size limit.",
+  PDF_ENCRYPTED: "The PDF is encrypted and cannot be processed.",
+  PDF_INVALID: "The PDF could not be processed.",
+  PDF_RENDER_FAILED: "The PDF could not be rendered.",
+  TASK_NOT_FOUND: "The task was not found.",
+  TASK_ACTIVE: "The task is still being processed.",
+  MODEL_UNAVAILABLE: "The audit service is temporarily unavailable.",
+  INVALID_MODEL_OUTPUT: "The audit result could not be validated.",
+  WORKER_RETRY_EXHAUSTED: "The task could not be completed after repeated attempts.",
+});
+
+const UNKNOWN_TASK_FAILURE_MESSAGE = "The audit could not be completed.";
+
+function safeFailureMessage(errorCode: string): string {
+  return TASK_FAILURE_MESSAGES[errorCode] ?? UNKNOWN_TASK_FAILURE_MESSAGE;
+}
 
 function parseJson<T>(value: string | null, parse: (input: unknown) => T): T | null {
   return value === null ? null : parse(JSON.parse(value));
@@ -121,10 +139,17 @@ function mapTaskDetail(row: TaskRow): AuditTaskDetail {
     issueCount: row.issue_count,
     summary: parseJson(row.summary_json, StrictExtractionSummarySchema.parse),
     pdfExpiresAt: row.pdf_expires_at,
-    pdfAvailable: row.pdf_path !== null && row.pdf_deleted_at === null,
+    pdfAvailable: isPdfAvailable(row),
     reportText: row.report_text,
     report: parseJson(row.report_json, StrictAuditReportSchema.parse),
   };
+}
+
+function isPdfAvailable(row: TaskRow): boolean {
+  if (row.pdf_path === null || row.pdf_deleted_at !== null) return false;
+  if (row.pdf_expires_at === null) return true;
+  const expiration = Date.parse(row.pdf_expires_at);
+  return Number.isFinite(expiration) && expiration > Date.now();
 }
 
 function mapTaskSummary(row: TaskRow): AuditTaskSummary {
@@ -287,7 +312,13 @@ export class TaskRepository {
       UPDATE audit_tasks
       SET status = 'failed', error_code = ?, error_message = ?, updated_at = ?, completed_at = ?
       WHERE id = ? AND status NOT IN ('completed', 'failed')
-    `).run(input.errorCode, input.errorMessage, input.now, input.now, input.id);
+    `).run(
+      input.errorCode,
+      safeFailureMessage(input.errorCode),
+      input.now,
+      input.now,
+      input.id,
+    );
     if (!changedRows(result)) return null;
     const row = this.db.prepare("SELECT * FROM audit_tasks WHERE id = ?").get(input.id) as TaskRow;
     return mapTaskDetail(row);
@@ -295,19 +326,32 @@ export class TaskRepository {
 
   recoverInterrupted(now: string, maxAttempts: number): void {
     const activeStatuses = ACTIVE_STATUSES.map(() => "?").join(", ");
-    this.db.prepare(`
-      UPDATE audit_tasks
-      SET status = 'queued', progress = 0, processed_pages = 0,
-          updated_at = ?, completed_at = NULL, error_code = NULL, error_message = NULL
-      WHERE status IN (${activeStatuses}) AND attempt_count < ?
-    `).run(now, ...ACTIVE_STATUSES, maxAttempts);
-    this.db.prepare(`
-      UPDATE audit_tasks
-      SET status = 'failed', updated_at = ?, completed_at = ?,
-          error_code = 'WORKER_RETRY_EXHAUSTED',
-          error_message = 'Worker retry limit exhausted.'
-      WHERE status IN (${activeStatuses}) AND attempt_count >= ?
-    `).run(now, now, ...ACTIVE_STATUSES, maxAttempts);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`
+        UPDATE audit_tasks
+        SET status = 'queued', progress = 0, processed_pages = 0,
+            updated_at = ?, completed_at = NULL, error_code = NULL, error_message = NULL
+        WHERE status IN (${activeStatuses}) AND attempt_count < ?
+      `).run(now, ...ACTIVE_STATUSES, maxAttempts);
+      this.db.prepare(`
+        UPDATE audit_tasks
+        SET status = 'failed', updated_at = ?, completed_at = ?,
+            error_code = ?, error_message = ?
+        WHERE status IN (${activeStatuses}) AND attempt_count >= ?
+      `).run(
+        now,
+        now,
+        "WORKER_RETRY_EXHAUSTED",
+        safeFailureMessage("WORKER_RETRY_EXHAUSTED"),
+        ...ACTIVE_STATUSES,
+        maxAttempts,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   retryOwned(ownerEmail: string, id: string, now: string): AuditTaskDetail | null {
@@ -365,8 +409,11 @@ export class TaskRepository {
     return changedRows(this.db.prepare(`
       UPDATE audit_tasks
       SET pdf_path = NULL, pdf_deleted_at = ?, updated_at = ?
-      WHERE id = ? AND pdf_deleted_at IS NULL
-    `).run(now, now, id));
+      WHERE id = ?
+        AND status IN ('completed', 'failed')
+        AND pdf_expires_at IS NOT NULL AND pdf_expires_at <= ?
+        AND pdf_deleted_at IS NULL AND pdf_path IS NOT NULL
+    `).run(now, now, id, now));
   }
 }
 
