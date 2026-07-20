@@ -74,6 +74,8 @@ export type TaskListOptions = {
   limit: number;
 };
 
+export class InvalidTaskCursorError extends Error {}
+
 export type BatchDeleteResult = {
   active: boolean;
   tasks: WorkerTask[];
@@ -227,6 +229,7 @@ export class TaskRepository {
     const cursor = options.cursor
       ? this.db.prepare("SELECT created_at, id FROM audit_tasks WHERE id = ? AND owner_email = ?").get(options.cursor, ownerEmail) as Pick<TaskRow, "created_at" | "id"> | undefined
       : undefined;
+    if (options.cursor && !cursor) throw new InvalidTaskCursorError("Invalid task cursor.");
     const rows = this.db.prepare(`
       SELECT * FROM audit_tasks
       WHERE owner_email = ?
@@ -260,10 +263,6 @@ export class TaskRepository {
       "SELECT * FROM audit_tasks WHERE id = ? AND owner_email = ?",
     ).get(id, ownerEmail) as TaskRow | undefined;
     return row ? mapTaskDetail(row) : null;
-  }
-
-  hasOwnedCursor(ownerEmail: string, id: string): boolean {
-    return Boolean(this.db.prepare("SELECT 1 FROM audit_tasks WHERE id = ? AND owner_email = ?").get(id, ownerEmail));
   }
 
   getOwnedWorker(ownerEmail: string, id: string): WorkerTask | null {

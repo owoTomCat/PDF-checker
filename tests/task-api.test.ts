@@ -86,6 +86,19 @@ test("upload becomes durable before returning 202", async (t) => {
   assert.equal(task?.pdfAvailable, true);
 });
 
+test("rejects an overlong public filename before creating file artifacts", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-long-name-"));
+  const api = createTaskApiForDataDir(root, { requireAuth: true });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const form = new FormData();
+  form.set("pdf", new File(["%PDF-1.7\nbody"], `${"a".repeat(256)}.pdf`, { type: "application/pdf" }));
+  const response = await api.create(authenticatedRequest("https://pdf.example/api/tasks", { method: "POST", body: form }));
+  assert.equal(response.status, 422);
+  assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
+  await assert.rejects(access(path.join(root, "uploads")));
+});
+
 test("another owner sees not found instead of task metadata", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-owner-"));
   const api = createTaskApiForDataDir(root, { requireAuth: true });

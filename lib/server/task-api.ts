@@ -19,7 +19,7 @@ import {
   validatePdfUpload,
 } from "./task-files";
 import { openTaskDatabase } from "./task-database";
-import { TASK_FAILURE_MESSAGES, TaskRepository } from "./task-repository";
+import { InvalidTaskCursorError, TASK_FAILURE_MESSAGES, TaskRepository } from "./task-repository";
 import { taskOwnerFromRequest } from "./task-owner";
 
 const PDF_RETENTION_MS = 72 * 60 * 60 * 1_000;
@@ -35,6 +35,9 @@ class TaskApiError extends Error {
 }
 
 function taskApiErrorResponse(error: unknown): Response {
+  if (error instanceof InvalidTaskCursorError) {
+    return Response.json({ error: { code: "INVALID_CURSOR", message: "The task cursor is invalid." } }, { status: 400 });
+  }
   if (error instanceof TaskApiError || error instanceof RequestGuardError) {
     return Response.json(
       { error: { code: error.code, message: error.message } },
@@ -77,7 +80,8 @@ function isTerminal(status: string): boolean {
 
 function safeUploadedFileName(name: string): string {
   const normalized = name.replace(/^.*[\\/]/, "").trim();
-  return normalized || "upload.pdf";
+  if (!normalized || normalized.length > 255) throw invalidInput();
+  return normalized;
 }
 
 function isPrivatePdfPath(pdfPath: string, dataDir: string): boolean {
@@ -109,6 +113,7 @@ export class TaskApi {
 
   async create(request: Request): Promise<Response> {
     let pdfPath: string | null = null;
+    let committed = false;
     try {
       const ownerEmail = taskOwnerFromRequest(request, this.env);
       let form: FormData;
@@ -120,6 +125,7 @@ export class TaskApi {
       const values = form.getAll("pdf");
       if (values.length !== 1 || !(values[0] instanceof File)) throw invalidInput();
       const file = values[0];
+      const fileName = safeUploadedFileName(file.name);
       const bytes = await validatePdfUpload(file);
       const id = this.createId();
       pdfPath = await persistPdf({ dataDir: this.dataDir, taskId: id, bytes });
@@ -127,16 +133,17 @@ export class TaskApi {
       const task = this.repository.create({
         id,
         ownerEmail,
-        fileName: safeUploadedFileName(file.name),
+        fileName,
         fileSize: file.size,
         fileType: file.type || null,
         pdfPath,
         pdfExpiresAt: new Date(now.getTime() + PDF_RETENTION_MS).toISOString(),
         now: now.toISOString(),
       });
+      committed = true;
       return Response.json(AuditTaskSummarySchema.parse(this.summary(task)), { status: 202 });
     } catch (error) {
-      if (pdfPath !== null) {
+      if (pdfPath !== null && !committed) {
         try {
           await this.deletePrivatePdf(pdfPath);
         } catch {
@@ -156,9 +163,6 @@ export class TaskApi {
       const rawQuery = Object.fromEntries(new URL(request.url).searchParams.entries());
       const parsed = TaskListQuerySchema.safeParse(rawQuery);
       if (!parsed.success) throw invalidInput();
-      if (parsed.data.cursor && !this.repository.hasOwnedCursor(ownerEmail, parsed.data.cursor)) {
-        throw new TaskApiError("INVALID_CURSOR", 400, "The task cursor is invalid.");
-      }
       const result = this.repository.list(ownerEmail, parsed.data);
       return Response.json({ ...result, items: result.items.map((item) => AuditTaskSummarySchema.parse(item)) });
     } catch (error) {
@@ -235,6 +239,10 @@ export class TaskApi {
         ...task,
         id: `legacy-${createHash("sha256").update(`${ownerEmail}\0${task.id}`).digest("hex")}`,
         fileName: safeUploadedFileName(task.fileName),
+        createdAt: new Date(task.createdAt).toISOString(),
+        updatedAt: new Date(task.updatedAt).toISOString(),
+        startedAt: task.startedAt ? new Date(task.startedAt).toISOString() : null,
+        completedAt: task.completedAt ? new Date(task.completedAt).toISOString() : null,
       }));
       return Response.json({ imported: this.repository.importOwnedTerminal(ownerEmail, tasks) });
     } catch (error) {
