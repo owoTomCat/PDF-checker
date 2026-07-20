@@ -6,12 +6,12 @@ Move PDF parsing and rendering out of the browser. The browser uploads each orig
 
 The design must preserve the current product behavior:
 
-- authenticate model-backed work in production;
+- enforce same-origin access and an explicit production ownership mode, using trusted authentication for any multi-user deployment;
 - process at most three audit tasks concurrently;
 - retain the current strict audit rules and `qwen3.7-plus` model contract;
 - keep task search, date filtering, single deletion, and batch deletion;
 - recover unfinished work after a service restart;
-- never expose API keys, server paths, or another user's tasks.
+- never expose API keys or server paths, and never expose another authenticated user's tasks in multi-user mode.
 
 The user's new requirement explicitly supersedes the repository's previous rule that original PDFs must never be uploaded to the application server. The replacement boundary is: original PDFs may be stored only in the server's private data directory, are never committed or logged, and are deleted after 72 hours.
 
@@ -67,6 +67,8 @@ Configuration:
 PDF_AUDIT_DATA_DIR=/var/lib/pdf-checker
 PDF_AUDIT_PDF_RETENTION_HOURS=72
 PDF_AUDIT_WORKER_CONCURRENCY=3
+PDF_AUDIT_WORKER_POLL_MS=1000
+PDF_AUDIT_SINGLE_TENANT_OWNER=
 ```
 
 The directory is owned by the service account `ubuntu`, has mode `0700`, and uploaded files have mode `0600`. The systemd units set `UMask=0077`. Original filenames are metadata only and are never used to construct filesystem paths.
@@ -125,7 +127,9 @@ Ordinary model or document errors are terminal for that attempt and are not blin
 
 ## Task APIs
 
-All routes use the existing same-origin and production authentication guard. The authenticated email is the ownership key. When authentication is explicitly disabled outside production, the server uses a fixed `local-development` owner; production never falls back to this identity.
+All routes use the existing same-origin and authentication guard. In an authenticated deployment, the authenticated email is the ownership key. In an auth-disabled single-tenant deployment, the server ignores caller-supplied identity headers and requires an explicit `PDF_AUDIT_SINGLE_TENANT_OWNER`; production never invents or falls back to an identity. Only non-production mode may fall back to `local-development`.
+
+The current Tencent deployment uses the explicit single-tenant owner so the same server history is visible from the user's other computers. A future trusted authentication proxy can set `PDF_AUDIT_REQUIRE_AUTH=true`, provide `oai-authenticated-user-email`, and leave the single-tenant owner empty without changing the task schema.
 
 ### `POST /api/tasks`
 
@@ -133,7 +137,7 @@ Accept one multipart field named `pdf` and return `202 Accepted` with the create
 
 Validation order:
 
-1. same-origin and authenticated request;
+1. same-origin request plus either authenticated ownership or an explicitly configured single-tenant owner;
 2. exactly one file;
 3. non-empty and no larger than 20 MiB;
 4. PDF filename or MIME type;
@@ -250,6 +254,7 @@ Deployment adds:
 - an update to `AGENTS.md` replacing the obsolete browser-only PDF boundary with the approved private 72-hour server-retention boundary;
 - `/var/lib/pdf-checker/data` and `/var/lib/pdf-checker/uploads` with private permissions;
 - `PDF_AUDIT_DATA_DIR` and retention/concurrency variables in `/etc/pdf-checker.env`;
+- an explicit single-tenant owner in the current auth-disabled Tencent deployment, with no production identity fallback;
 - `pdf-checker-worker.service`, ordered after the data-directory setup and network availability;
 - a build step that emits `dist/audit-worker.mjs` from the typed worker entry point, with Node native modules externalized;
 - `pdf-checker-worker.service` starts `/usr/local/bin/node /opt/pdf-checker/current/dist/audit-worker.mjs`;
