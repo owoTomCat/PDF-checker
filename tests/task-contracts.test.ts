@@ -43,12 +43,25 @@ test("legacy import accepts terminal tasks only", () => {
     updatedAt: "2026-07-20T00:00:00.000Z",
     startedAt: null,
     completedAt: null,
+    errorCode: null,
     errorMessage: null,
     issueCount: null,
     summary: null,
+    pdfExpiresAt: null,
+    pdfAvailable: false,
     reportText: null,
     report: null,
   };
   assert.throws(() => TaskImportRequestSchema.parse({ tasks: [queued] }));
   assert.throws(() => AuditTaskDetailSchema.parse({ ...queued, status: "unknown" }));
+  const completed = {
+    ...queued,
+    status: "completed",
+    outcome: "passed",
+    progress: 100,
+    completedAt: "2026-07-20T00:01:00.000Z",
+  };
+  assert.deepEqual(TaskImportRequestSchema.parse({ tasks: [completed] }), {
+    tasks: [completed],
+  });
 });
