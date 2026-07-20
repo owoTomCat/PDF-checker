@@ -425,6 +425,14 @@ export class TaskRepository {
         AND pdf_deleted_at IS NULL AND pdf_path IS NOT NULL
     `).run(now, now, id, now));
   }
+
+  isPdfPathReferenced(pdfPath: string): boolean {
+    return this.db.prepare(`
+      SELECT 1 FROM audit_tasks
+      WHERE pdf_path = ? AND pdf_deleted_at IS NULL
+      LIMIT 1
+    `).get(pdfPath) !== undefined;
+  }
 }
 
 export type { StrictFinalAuditResponse };
