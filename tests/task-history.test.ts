@@ -172,7 +172,41 @@ test("converts local calendar filters into bounded server query timestamps", () 
     {
       query: "Alpha",
       createdFrom: new Date(2026, 6, 12).toISOString(),
-      createdTo: new Date(2026, 6, 19).toISOString(),
+      createdTo: new Date(2026, 6, 18, 23, 59, 59, 999).toISOString(),
+      limit: 80,
+    },
+  );
+});
+
+test("uses inclusive end-of-day timestamps for every server date preset", () => {
+  const base = { query: "", customStart: "", customEnd: "" };
+  for (const [dateFilter, expectedStart] of [
+    ["today", new Date(2026, 6, 18)],
+    ["7d", new Date(2026, 6, 12)],
+    ["30d", new Date(2026, 5, 19)],
+  ] as const) {
+    assert.deepEqual(
+      historyFiltersToTaskListFilters({ ...base, dateFilter }, now),
+      {
+        createdFrom: expectedStart.toISOString(),
+        createdTo: new Date(2026, 6, 18, 23, 59, 59, 999).toISOString(),
+        limit: 80,
+      },
+    );
+  }
+  assert.deepEqual(
+    historyFiltersToTaskListFilters(
+      {
+        ...base,
+        dateFilter: "custom",
+        customStart: "2026-06-01",
+        customEnd: "2026-06-03",
+      },
+      now,
+    ),
+    {
+      createdFrom: new Date(2026, 5, 1).toISOString(),
+      createdTo: new Date(2026, 5, 3, 23, 59, 59, 999).toISOString(),
       limit: 80,
     },
   );

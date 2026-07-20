@@ -6,7 +6,7 @@ export const LEGACY_MIGRATION_MARKER_KEY =
   "pdf-audit-workspace.tasks.v4.server-migrated";
 export const MAX_LEGACY_STORAGE_BYTES = 1_000_000;
 
-export type LegacyStorage = Pick<Storage, "getItem" | "setItem">;
+export type LegacyStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 export type HistoryDateFilter =
   | "all"
@@ -85,7 +85,9 @@ export function historyFiltersToTaskListFilters(
   return {
     ...(query ? { query } : {}),
     ...(start ? { createdFrom: start.toISOString() } : {}),
-    ...(endExclusive ? { createdTo: endExclusive.toISOString() } : {}),
+    ...(endExclusive
+      ? { createdTo: new Date(endExclusive.getTime() - 1).toISOString() }
+      : {}),
     limit: 80,
   };
 }
@@ -198,11 +200,24 @@ export async function migrateLegacyTaskHistory(
   importTasks: (tasks: AuditTaskDetail[]) => Promise<number>,
 ): Promise<LegacyMigrationResult> {
   if (storage.getItem(LEGACY_MIGRATION_MARKER_KEY)) {
+    try {
+      storage.removeItem(LEGACY_TASK_STORAGE_KEY);
+    } catch {
+      // The marker prevents another API import; a later mount retries cleanup.
+    }
     return { status: "already-migrated", imported: 0 };
   }
+  const finish = () => {
+    storage.setItem(LEGACY_MIGRATION_MARKER_KEY, new Date().toISOString());
+    try {
+      storage.removeItem(LEGACY_TASK_STORAGE_KEY);
+    } catch {
+      // Best-effort privacy cleanup is retried when the marker is seen again.
+    }
+  };
   const raw = storage.getItem(LEGACY_TASK_STORAGE_KEY);
   if (!raw || new TextEncoder().encode(raw).byteLength > MAX_LEGACY_STORAGE_BYTES) {
-    storage.setItem(LEGACY_MIGRATION_MARKER_KEY, new Date().toISOString());
+    finish();
     return { status: "skipped", imported: 0 };
   }
 
@@ -210,11 +225,11 @@ export async function migrateLegacyTaskHistory(
   try {
     values = JSON.parse(raw);
   } catch {
-    storage.setItem(LEGACY_MIGRATION_MARKER_KEY, new Date().toISOString());
+    finish();
     return { status: "skipped", imported: 0 };
   }
   if (!Array.isArray(values)) {
-    storage.setItem(LEGACY_MIGRATION_MARKER_KEY, new Date().toISOString());
+    finish();
     return { status: "skipped", imported: 0 };
   }
   const tasks: AuditTaskDetail[] = [];
@@ -224,11 +239,11 @@ export async function migrateLegacyTaskHistory(
     if (tasks.length === 80) break;
   }
   if (tasks.length === 0) {
-    storage.setItem(LEGACY_MIGRATION_MARKER_KEY, new Date().toISOString());
+    finish();
     return { status: "skipped", imported: 0 };
   }
 
   const imported = await importTasks(tasks);
-  storage.setItem(LEGACY_MIGRATION_MARKER_KEY, new Date().toISOString());
+  finish();
   return { status: "imported", imported };
 }

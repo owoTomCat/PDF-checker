@@ -63,7 +63,14 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   assert.match(taskCoordinatorSource, /2_000|2000/);
   assert.match(taskCoordinatorSource, /5_000|5000/);
   assert.match(taskHookSource, /250/);
-  assert.match(taskHookSource, /deletedVersionRef\.current\.has\(incoming\.id\)/);
+  assert.match(taskHookSource, /const MAX_PARALLEL_UPLOADS = 3/);
+  assert.match(
+    taskHookSource,
+    /new SharedUploadQueue<File, AuditTaskSummary>\(MAX_PARALLEL_UPLOADS\)/,
+  );
+  assert.match(taskHookSource, /viewState\.beginAction\(id\)/);
+  assert.match(consoleSource, /event\.currentTarget\.value = ""/);
+  assert.match(consoleSource, /removeCheckedTaskId\(current, selectedTask\.id\)/);
   assert.match(consoleSource, /return loadTaskDetails\(selectedTaskId\)/);
   assert.match(auditPipelineSource, /export async function runAuditPipeline/);
   assert.doesNotMatch(
@@ -117,6 +124,7 @@ test("uses a cross-platform vinext launcher", async () => {
   assert.equal(packageJson.scripts.build, "npm run build:web && npm run build:worker");
   assert.equal(packageJson.scripts.start, "node scripts/run-vinext.mjs start");
   assert.equal(packageJson.scripts["start:worker"], "node dist/audit-worker.mjs");
+  assert.match(packageJson.scripts["test:source"], /client-artifact\.test\.mjs/);
   assert.doesNotMatch(JSON.stringify(packageJson.scripts), /WRANGLER_LOG_PATH=/);
   assert.match(launcher, /process\.execPath/);
   assert.match(launcher, /"vinext",\s*"dist",\s*"cli\.js"/s);

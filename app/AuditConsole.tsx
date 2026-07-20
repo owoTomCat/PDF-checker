@@ -5,6 +5,7 @@ import { useAuditTasks } from "@/app/useAuditTasks";
 import {
   ACTIVE_TASK_STATUSES,
   isActiveTask,
+  removeCheckedTaskId,
 } from "@/lib/client/task-coordinator";
 import { type HistoryDateFilter } from "@/lib/client/task-history";
 import type {
@@ -112,14 +113,6 @@ export function AuditConsole() {
     selectableFilteredIds.length > 0 &&
     selectableFilteredIds.every((id) => checkedTaskIds.has(id));
 
-  const uploadFiles = useCallback(
-    (fileList: FileList | File[]) =>
-      uploadServerFiles(fileList).finally(() => {
-        if (inputRef.current) inputRef.current.value = "";
-      }),
-    [uploadServerFiles],
-  );
-
   useEffect(() => {
     if (selectedTaskId) return loadTaskDetails(selectedTaskId);
   }, [loadTaskDetails, selectedTaskId]);
@@ -209,7 +202,8 @@ export function AuditConsole() {
         onDrop={(event) => {
           event.preventDefault();
           setDragging(false);
-          void uploadFiles(event.dataTransfer.files);
+          const files = Array.from(event.dataTransfer.files);
+          void uploadServerFiles(files);
         }}
       >
         <input
@@ -218,9 +212,9 @@ export function AuditConsole() {
           accept="application/pdf,.pdf"
           multiple
           onChange={(event) => {
-            if (event.currentTarget.files) {
-              void uploadFiles(event.currentTarget.files);
-            }
+            const files = Array.from(event.currentTarget.files ?? []);
+            event.currentTarget.value = "";
+            void uploadServerFiles(files);
           }}
         />
         <div className="upload-icon">PDF</div>
@@ -446,7 +440,12 @@ export function AuditConsole() {
                 <button
                   type="button"
                   className="ghost"
-                  onClick={() => void retry(selectedTask.id)}
+                  onClick={() => {
+                    setCheckedTaskIds((current) =>
+                      removeCheckedTaskId(current, selectedTask.id),
+                    );
+                    void retry(selectedTask.id);
+                  }}
                   disabled={isActiveTask(selectedTask)}
                 >
                   重新处理

@@ -40,7 +40,7 @@ function defaultFetch(input: RequestInfo | URL, init?: RequestInit) {
   return globalThis.fetch(input, init);
 }
 
-function isAbortError(error: unknown) {
+export function isTaskAbortError(error: unknown) {
   return error instanceof DOMException
     ? error.name === "AbortError"
     : Boolean(error && typeof error === "object" && "name" in error && error.name === "AbortError");
@@ -55,7 +55,7 @@ async function request(
   try {
     response = await fetchImpl(url, init);
   } catch (error) {
-    if (isAbortError(error)) throw error;
+    if (isTaskAbortError(error)) throw error;
     throw new TaskApiClientError("SERVICE_UNAVAILABLE", 0, SERVICE_UNAVAILABLE_MESSAGE);
   }
   if (response.ok) return response;

@@ -11,6 +11,7 @@ class MemoryStorage {
   readonly values = new Map<string, string>();
   getItem(key: string) { return this.values.get(key) ?? null; }
   setItem(key: string, value: string) { this.values.set(key, value); }
+  removeItem(key: string) { this.values.delete(key); }
 }
 
 function legacyTask(overrides: Record<string, unknown> = {}) {
@@ -66,6 +67,7 @@ test("migration imports only bounded terminal schema fields and writes the marke
   assert.equal("localAbsolutePath" in (imported[0] as object), false);
   assert.equal("fileBlob" in (imported[0] as object), false);
   assert.ok(storage.getItem(LEGACY_MIGRATION_MARKER_KEY));
+  assert.equal(storage.getItem(LEGACY_TASK_STORAGE_KEY), null);
 });
 
 test("marker makes migration idempotent without another service call", async () => {
@@ -81,6 +83,7 @@ test("marker makes migration idempotent without another service call", async () 
 
   assert.equal(result.status, "already-migrated");
   assert.equal(calls, 0);
+  assert.equal(storage.getItem(LEGACY_TASK_STORAGE_KEY), null);
 });
 
 test("failed imports remain retryable but issue only one request per invocation", async () => {
@@ -95,6 +98,7 @@ test("failed imports remain retryable but issue only one request per invocation"
   await assert.rejects(migrateLegacyTaskHistory(storage, importer), /offline/);
   assert.equal(calls, 1);
   assert.equal(storage.getItem(LEGACY_MIGRATION_MARKER_KEY), null);
+  assert.ok(storage.getItem(LEGACY_TASK_STORAGE_KEY));
   await assert.rejects(migrateLegacyTaskHistory(storage, importer), /offline/);
   assert.equal(calls, 2);
 });
@@ -115,5 +119,49 @@ test("malformed and byte-oversized storage are skipped permanently without calli
     assert.equal(result.status, "skipped");
     assert.equal(calls, 0);
     assert.ok(storage.getItem(LEGACY_MIGRATION_MARKER_KEY));
+    assert.equal(storage.getItem(LEGACY_TASK_STORAGE_KEY), null);
   }
+});
+
+test("empty and nonimportable legacy histories are marked and removed without an API call", async () => {
+  for (const value of [[], [legacyTask({ status: "rendering", outcome: null })]]) {
+    const storage = new MemoryStorage();
+    storage.setItem(LEGACY_TASK_STORAGE_KEY, JSON.stringify(value));
+    let calls = 0;
+    const result = await migrateLegacyTaskHistory(storage, async () => {
+      calls += 1;
+      return 0;
+    });
+    assert.equal(result.status, "skipped");
+    assert.equal(calls, 0);
+    assert.ok(storage.getItem(LEGACY_MIGRATION_MARKER_KEY));
+    assert.equal(storage.getItem(LEGACY_TASK_STORAGE_KEY), null);
+  }
+});
+
+test("a marker prevents repeat import and later mounts retry best-effort legacy cleanup", async () => {
+  class FlakyRemoveStorage extends MemoryStorage {
+    failures = 1;
+    override removeItem(key: string) {
+      if (this.failures > 0) {
+        this.failures -= 1;
+        throw new Error("quota backend unavailable");
+      }
+      super.removeItem(key);
+    }
+  }
+  const storage = new FlakyRemoveStorage();
+  storage.setItem(LEGACY_TASK_STORAGE_KEY, JSON.stringify([legacyTask()]));
+  let calls = 0;
+  const importer = async () => {
+    calls += 1;
+    return 1;
+  };
+
+  assert.equal((await migrateLegacyTaskHistory(storage, importer)).status, "imported");
+  assert.ok(storage.getItem(LEGACY_MIGRATION_MARKER_KEY));
+  assert.ok(storage.getItem(LEGACY_TASK_STORAGE_KEY));
+  assert.equal((await migrateLegacyTaskHistory(storage, importer)).status, "already-migrated");
+  assert.equal(calls, 1);
+  assert.equal(storage.getItem(LEGACY_TASK_STORAGE_KEY), null);
 });
