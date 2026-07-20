@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       LayoutRequestMetadataSchema,
     );
 
-    const gateway = createBailianAuditGateway(createBailianClientFromEnv());
+    const gateway = createBailianAuditGateway(createBailianClientFromEnv);
     return NextResponse.json(await gateway.locate(metadata, images));
   } catch (error) {
     return modelRouteErrorResponse(error, "页面区域定位失败，请稍后重试。");

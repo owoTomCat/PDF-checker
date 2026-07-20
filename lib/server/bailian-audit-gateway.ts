@@ -20,6 +20,7 @@ import {
 } from "./bailian-client";
 
 type BailianClient = ReturnType<typeof createBailianClient>;
+type BailianClientProvider = BailianClient | (() => BailianClient);
 
 export class AuditGatewayInputError extends Error {
   readonly code = "INVALID_INPUT";
@@ -54,16 +55,19 @@ function assertImageCount(images: RenderedImage[], expected: number) {
   }
 }
 
-function requireClient(client: BailianClient | undefined) {
-  if (!client) {
-    throw new BailianClientError("CONFIG_ERROR", "百炼客户端未配置。");
-  }
-  return client;
-}
-
 export function createBailianAuditGateway(
-  configuredClient?: BailianClient,
+  provider?: BailianClientProvider,
 ): AuditStageGateway {
+  let resolvedClient = typeof provider === "function" ? undefined : provider;
+  function resolveClient() {
+    if (resolvedClient) return resolvedClient;
+    if (typeof provider !== "function") {
+      throw new BailianClientError("CONFIG_ERROR", "百炼客户端未配置。");
+    }
+    resolvedClient = provider();
+    return resolvedClient;
+  }
+
   return {
     async locate(rawMetadata, images) {
       const metadata = LayoutRequestMetadataSchema.parse(rawMetadata);
@@ -75,8 +79,8 @@ export function createBailianAuditGateway(
         invalidInput("页码重复或超出 PDF 页数。");
       }
       assertImageCount(images, metadata.pageNumbers.length);
-      const client = requireClient(configuredClient);
       const dataUrls = await imageDataUrls(images);
+      const client = resolveClient();
       const output = await client.locateRegions({
         fileName: metadata.fileName,
         totalPages: metadata.totalPages,
@@ -125,8 +129,8 @@ export function createBailianAuditGateway(
         );
       }
       assertImageCount(images, metadata.regions.length);
-      const client = requireClient(configuredClient);
       const dataUrls = await imageDataUrls(images);
+      const client = resolveClient();
       const output = await client.recognizeEvidence({
         fileName: metadata.fileName,
         totalPages: metadata.totalPages,
@@ -199,8 +203,8 @@ export function createBailianAuditGateway(
         invalidInput("URL 复核记录重复或页码越界。");
       }
       assertImageCount(images, metadata.pairs.length * 2);
-      const client = requireClient(configuredClient);
       const dataUrls = await imageDataUrls(images);
+      const client = resolveClient();
       const output = await client.reviewUrls({
         fileName: metadata.fileName,
         totalPages: metadata.totalPages,
@@ -236,8 +240,8 @@ export function createBailianAuditGateway(
         invalidInput("表格区域重复或页码越界。");
       }
       assertImageCount(images, metadata.regions.length);
-      const client = requireClient(configuredClient);
       const dataUrls = await imageDataUrls(images);
+      const client = resolveClient();
       const output = await client.extractTable({
         fileName: metadata.fileName,
         totalPages: metadata.totalPages,
@@ -263,7 +267,7 @@ export function createBailianAuditGateway(
 
     async associate(rawInput) {
       const input = AssociationRequestSchema.parse(rawInput);
-      const client = requireClient(configuredClient);
+      const client = resolveClient();
       const output = await client.associateRows(input);
       const expectedScreenshotIds = new Set(
         input.screenshots.map((item) => item.id),

@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       TableRequestMetadataSchema,
     );
 
-    const gateway = createBailianAuditGateway(createBailianClientFromEnv());
+    const gateway = createBailianAuditGateway(createBailianClientFromEnv);
     return NextResponse.json(await gateway.extractTable(metadata, images));
   } catch (error) {
     return modelRouteErrorResponse(error, "汇总表提取失败，请稍后重试。");

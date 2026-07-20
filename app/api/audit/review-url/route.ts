@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       UrlReviewRequestMetadataSchema,
     );
 
-    const gateway = createBailianAuditGateway(createBailianClientFromEnv());
+    const gateway = createBailianAuditGateway(createBailianClientFromEnv);
     return NextResponse.json(await gateway.reviewUrls(metadata, images));
   } catch (error) {
     return modelRouteErrorResponse(error, "地址栏 URL 复核失败，请稍后重试。");

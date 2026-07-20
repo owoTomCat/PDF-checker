@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       EvidenceRequestMetadataSchema,
     );
 
-    const gateway = createBailianAuditGateway(createBailianClientFromEnv());
+    const gateway = createBailianAuditGateway(createBailianClientFromEnv);
     return NextResponse.json(await gateway.recognize(metadata, images));
   } catch (error) {
     return modelRouteErrorResponse(error, "证书和截图识别失败，请稍后重试。");

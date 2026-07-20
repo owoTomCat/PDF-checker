@@ -11,6 +11,7 @@ import { RequestGuardError } from "./request-guards";
 export const MAX_MODEL_MULTIPART_BODY_BYTES =
   MAX_BATCH_IMAGE_BYTES + 2 * 1024 * 1024;
 export const MAX_MODEL_JSON_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_MULTIPART_IMAGE_PARTS = 8;
 
 export class RouteInputError extends Error {
   constructor(
@@ -123,6 +124,13 @@ export async function parseImageBatchRequest<T>(
     throw new RouteInputError("INVALID_IMAGE", 422, "图片字段格式无效。");
   }
   const files = values as File[];
+  if (files.length > MAX_MULTIPART_IMAGE_PARTS) {
+    throw new RouteInputError(
+      "INVALID_INPUT",
+      422,
+      "图片数量超过单批传输限制。",
+    );
+  }
   const totalImageBytes = files.reduce((sum, file) => sum + file.size, 0);
   if (totalImageBytes > MAX_BATCH_IMAGE_BYTES) {
     throw new RouteInputError(

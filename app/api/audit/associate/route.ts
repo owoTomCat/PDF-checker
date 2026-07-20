@@ -17,7 +17,7 @@ export async function POST(request: Request) {
   try {
     assertModelRequestAllowed(request, modelRequestGuardOptionsFromEnv());
     const input = await parseJsonRequest(request, AssociationRequestSchema);
-    const gateway = createBailianAuditGateway(createBailianClientFromEnv());
+    const gateway = createBailianAuditGateway(createBailianClientFromEnv);
     return NextResponse.json(await gateway.associate(input));
   } catch (error) {
     return modelRouteErrorResponse(error, "截图与表格关联失败，请稍后重试。");

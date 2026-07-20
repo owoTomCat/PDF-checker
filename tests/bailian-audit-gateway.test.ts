@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { RenderedImage } from "../lib/audit/gateway";
 import { createBailianAuditGateway } from "../lib/server/bailian-audit-gateway";
-import { strictFinalizeRequest } from "./strict-fixtures";
+import { strictFinalizeRequest, strictLayout } from "./strict-fixtures";
 
-type GatewayClient = Parameters<typeof createBailianAuditGateway>[0];
+type GatewayProvider = NonNullable<
+  Parameters<typeof createBailianAuditGateway>[0]
+>;
+type GatewayClient = Exclude<GatewayProvider, () => unknown>;
 
 function image(fileName = "page.jpg"): RenderedImage {
   return {
@@ -41,6 +44,64 @@ test("gateway finalizes without a client and rejects model stages safely", async
     ),
     /百炼客户端未配置/,
   );
+});
+
+test("gateway resolves a lazy client after validation and caches it", async () => {
+  let providerCalls = 0;
+  let clientCalls = 0;
+  const client = {
+    async locateRegions() {
+      clientCalls += 1;
+      return strictLayout;
+    },
+  } as unknown as GatewayClient;
+  const gateway = createBailianAuditGateway(() => {
+    providerCalls += 1;
+    return client;
+  });
+
+  for (let index = 0; index < 2; index += 1) {
+    const output = await gateway.locate(
+      { fileName: "example.pdf", totalPages: 1, pageNumbers: [1] },
+      [image()],
+    );
+    assert.equal(output.pages[0].pageNumber, 1);
+  }
+  assert.equal(providerCalls, 1);
+  assert.equal(clientCalls, 2);
+});
+
+test("gateway resolves its provider immediately before the model call", async () => {
+  const events: string[] = [];
+  class ObservedBlob extends Blob {
+    override async arrayBuffer() {
+      events.push("read-image");
+      return super.arrayBuffer();
+    }
+  }
+  const client = {
+    async locateRegions() {
+      events.push("model");
+      return strictLayout;
+    },
+  } as unknown as GatewayClient;
+  const gateway = createBailianAuditGateway(() => {
+    events.push("resolve-provider");
+    return client;
+  });
+
+  await gateway.locate(
+    { fileName: "example.pdf", totalPages: 1, pageNumbers: [1] },
+    [
+      {
+        blob: new ObservedBlob([new Uint8Array([0xff, 0xd8, 0xff])], {
+          type: "image/jpeg",
+        }),
+        fileName: "page.jpg",
+      },
+    ],
+  );
+  assert.deepEqual(events, ["read-image", "resolve-provider", "model"]);
 });
 
 test("gateway rejects duplicate and out-of-range layout pages before the client", async () => {

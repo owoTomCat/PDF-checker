@@ -146,6 +146,126 @@ test("layout API uses gateway validation for duplicate pages", async () => {
   }
 });
 
+test("layout API validates semantics and cardinality before lazy Bailian config", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.DASHSCOPE_API_KEY;
+  const originalBaseUrl = process.env.DASHSCOPE_BASE_URL;
+  const originalModel = process.env.QWEN_MODEL;
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return modelResponse(strictLayout);
+  };
+
+  try {
+    delete process.env.DASHSCOPE_API_KEY;
+    const duplicateResponse = await locateRegions(
+      multipartRequest(
+        "/api/audit/layout",
+        { fileName: "example.pdf", totalPages: 1, pageNumbers: [1, 1] },
+        [jpeg("page-1.jpg"), jpeg("page-1-duplicate.jpg")],
+      ),
+    );
+    assert.equal(duplicateResponse.status, 422);
+    assert.equal((await duplicateResponse.json()).error.code, "INVALID_INPUT");
+
+    process.env.DASHSCOPE_API_KEY = "test-secret";
+    process.env.DASHSCOPE_BASE_URL = "not-a-url";
+    process.env.QWEN_MODEL = "not-qwen";
+    const cardinalityResponse = await locateRegions(
+      multipartRequest(
+        "/api/audit/layout",
+        { fileName: "example.pdf", totalPages: 1, pageNumbers: [1] },
+        [jpeg("page-1.jpg"), jpeg("unexpected.jpg")],
+      ),
+    );
+    assert.equal(cardinalityResponse.status, 422);
+    assert.equal((await cardinalityResponse.json()).error.code, "INVALID_INPUT");
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.DASHSCOPE_API_KEY = originalApiKey;
+    process.env.DASHSCOPE_BASE_URL = originalBaseUrl;
+    process.env.QWEN_MODEL = originalModel;
+  }
+});
+
+test("layout API maps valid input with missing Bailian config safely", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.DASHSCOPE_API_KEY;
+  let called = false;
+  delete process.env.DASHSCOPE_API_KEY;
+  globalThis.fetch = async () => {
+    called = true;
+    return modelResponse(strictLayout);
+  };
+
+  try {
+    const response = await locateRegions(
+      multipartRequest(
+        "/api/audit/layout",
+        { fileName: "example.pdf", totalPages: 1, pageNumbers: [1] },
+        [jpeg()],
+      ),
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 503);
+    assert.equal(body.error.code, "CONFIG_ERROR");
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.DASHSCOPE_API_KEY = originalApiKey;
+  }
+});
+
+test("layout API rejects more than eight image parts before reading files", async () => {
+  let reads = 0;
+  class CountingFile extends File {
+    override async arrayBuffer() {
+      reads += 1;
+      return super.arrayBuffer();
+    }
+  }
+  const files = Array.from(
+    { length: 9 },
+    (_, index) =>
+      new CountingFile(
+        [new Uint8Array([0xff, 0xd8, 0xff, 0xdb])],
+        `page-${index + 1}.jpg`,
+        { type: "image/jpeg" },
+      ),
+  );
+  const form = {
+    get(name: string) {
+      return name === "metadata"
+        ? JSON.stringify({
+            fileName: "example.pdf",
+            totalPages: 1,
+            pageNumbers: [1],
+          })
+        : null;
+    },
+    getAll(name: string) {
+      return name === "images" ? files : [];
+    },
+  } as unknown as FormData;
+  const request = new Request("https://audit.example.com/api/audit/layout", {
+    method: "POST",
+    headers: { origin: "https://audit.example.com" },
+  });
+  Object.defineProperty(request, "formData", {
+    value: async () => form,
+  });
+
+  const response = await locateRegions(request);
+  const body = await response.json();
+
+  assert.equal(response.status, 422);
+  assert.equal(body.error.code, "INVALID_INPUT");
+  assert.equal(reads, 0);
+});
+
 test("evidence and table APIs reject metadata from the other stage", async () => {
   const evidenceResponse = await recognizeEvidence(
     multipartRequest(
