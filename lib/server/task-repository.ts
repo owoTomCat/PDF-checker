@@ -271,6 +271,10 @@ export class TaskRepository {
     return row ? mapTaskDetail(row) : null;
   }
 
+  hasOwnedCursor(ownerEmail: string, id: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM audit_tasks WHERE id = ? AND owner_email = ?").get(id, ownerEmail));
+  }
+
   getOwnedWorker(ownerEmail: string, id: string): WorkerTask | null {
     const row = this.db.prepare(
       "SELECT * FROM audit_tasks WHERE id = ? AND owner_email = ?",
@@ -405,11 +409,9 @@ export class TaskRepository {
       SET status = 'queued', progress = 0, processed_pages = 0, total_pages = NULL,
           outcome = NULL, model = NULL, issue_count = NULL, summary_json = NULL,
           report_json = NULL, report_text = NULL, error_code = NULL, error_message = NULL,
-          attempt_count = 0, started_at = NULL, completed_at = NULL, updated_at = ?,
-          deletion_token = NULL, deletion_reserved_at = NULL
+          attempt_count = 0, started_at = NULL, completed_at = NULL, updated_at = ?
       WHERE id = ? AND owner_email = ? AND status IN ('completed', 'failed')
         AND pdf_path IS NOT NULL AND pdf_deleted_at IS NULL
-        AND deletion_token IS NULL
         AND (pdf_expires_at IS NULL OR pdf_expires_at > ?)
     `).run(now, id, ownerEmail, now);
     if (!changedRows(result)) return null;
@@ -519,6 +521,29 @@ export class TaskRepository {
 
   releaseAllDeletionReservations(): void {
     this.db.prepare("UPDATE audit_tasks SET deletion_token = NULL, deletion_reserved_at = NULL WHERE deletion_token IS NOT NULL").run();
+  }
+
+  deleteOwnedTerminalPending(ownerEmail: string, ids: string[], now: string): BatchDeleteResult {
+    const placeholders = ids.map(() => "?").join(", ");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const active = this.db.prepare(`SELECT 1 FROM audit_tasks WHERE owner_email = ? AND id IN (${placeholders}) AND status NOT IN ('completed', 'failed') LIMIT 1`).get(ownerEmail, ...ids);
+      if (active) { this.db.exec("COMMIT"); return { active: true, tasks: [] }; }
+      const rows = this.db.prepare(`SELECT * FROM audit_tasks WHERE owner_email = ? AND id IN (${placeholders}) AND status IN ('completed', 'failed')`).all(ownerEmail, ...ids) as TaskRow[];
+      const queue = this.db.prepare("INSERT OR IGNORE INTO pending_pdf_deletions (pdf_path, queued_at) VALUES (?, ?)");
+      for (const row of rows) if (row.pdf_path !== null) queue.run(row.pdf_path, now);
+      if (rows.length) this.db.prepare(`DELETE FROM audit_tasks WHERE owner_email = ? AND id IN (${placeholders}) AND status IN ('completed', 'failed')`).run(ownerEmail, ...ids);
+      this.db.exec("COMMIT");
+      return { active: false, tasks: rows.map(mapWorkerTask) };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  findPendingPdfDeletions(): string[] {
+    return (this.db.prepare("SELECT pdf_path FROM pending_pdf_deletions ORDER BY queued_at ASC").all() as Array<{ pdf_path: string }>).map((row) => row.pdf_path);
+  }
+
+  markPendingPdfDeleted(pdfPath: string): void {
+    this.db.prepare("DELETE FROM pending_pdf_deletions WHERE pdf_path = ?").run(pdfPath);
   }
 
   deleteReservedOwnedTerminal(ownerEmail: string, id: string, token: string): boolean {

@@ -1,9 +1,11 @@
 import { access } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import {
   BatchDeleteRequestSchema,
+  AuditTaskDetailSchema,
+  AuditTaskSummarySchema,
   TaskImportRequestSchema,
   TaskListQuerySchema,
 } from "../task-contracts";
@@ -132,7 +134,7 @@ export class TaskApi {
         pdfExpiresAt: new Date(now.getTime() + PDF_RETENTION_MS).toISOString(),
         now: now.toISOString(),
       });
-      return Response.json(this.summary(task), { status: 202 });
+      return Response.json(AuditTaskSummarySchema.parse(this.summary(task)), { status: 202 });
     } catch (error) {
       if (pdfPath !== null) {
         try {
@@ -154,7 +156,11 @@ export class TaskApi {
       const rawQuery = Object.fromEntries(new URL(request.url).searchParams.entries());
       const parsed = TaskListQuerySchema.safeParse(rawQuery);
       if (!parsed.success) throw invalidInput();
-      return Response.json(this.repository.list(ownerEmail, parsed.data));
+      if (parsed.data.cursor && !this.repository.hasOwnedCursor(ownerEmail, parsed.data.cursor)) {
+        throw new TaskApiError("INVALID_CURSOR", 400, "The task cursor is invalid.");
+      }
+      const result = this.repository.list(ownerEmail, parsed.data);
+      return Response.json({ ...result, items: result.items.map((item) => AuditTaskSummarySchema.parse(item)) });
     } catch (error) {
       return taskApiErrorResponse(error);
     }
@@ -165,7 +171,7 @@ export class TaskApi {
       const ownerEmail = taskOwnerFromRequest(request, this.env);
       const task = this.repository.getOwned(ownerEmail, id);
       if (!task) throw taskNotFound();
-      return Response.json(task);
+      return Response.json(AuditTaskDetailSchema.parse(task));
     } catch (error) {
       return taskApiErrorResponse(error);
     }
@@ -174,23 +180,10 @@ export class TaskApi {
   async remove(request: Request, id: string): Promise<Response> {
     try {
       const ownerEmail = taskOwnerFromRequest(request, this.env);
-      const token = randomUUID();
-      const reservation = this.repository.reserveOwnedTerminalDeletion(ownerEmail, id, token);
-      if (reservation.state === "not_found") throw taskNotFound();
-      if (reservation.state === "active") throw taskActive();
-      if (reservation.state !== "reserved") {
-        throw new TaskApiError("INTERNAL_ERROR", 500, TASK_FAILURE_MESSAGES.INTERNAL_ERROR);
-      }
-      try {
-        await this.deletePrivatePdf(reservation.task.pdfPath);
-      } catch (error) {
-        this.repository.releaseOwnedTerminalDeletion(ownerEmail, id, token);
-        throw error;
-      }
-      if (!this.repository.deleteReservedOwnedTerminal(ownerEmail, id, token)) {
-        this.repository.releaseOwnedTerminalDeletion(ownerEmail, id, token);
-        throw new TaskApiError("INTERNAL_ERROR", 500, TASK_FAILURE_MESSAGES.INTERNAL_ERROR);
-      }
+      const removed = this.repository.deleteOwnedTerminalPending(ownerEmail, [id], new Date().toISOString());
+      if (removed.active) throw taskActive();
+      if (!removed.tasks.length) throw taskNotFound();
+      for (const task of removed.tasks) await this.deletePendingPdf(task.pdfPath);
       return new Response(null, { status: 204 });
     } catch (error) {
       return taskApiErrorResponse(error);
@@ -213,7 +206,7 @@ export class TaskApi {
       }
       const retried = this.repository.retryOwned(ownerEmail, id, new Date().toISOString());
       if (!retried) throw pdfUnavailable();
-      return Response.json(this.summary(retried), { status: 202 });
+      return Response.json(AuditTaskSummarySchema.parse(this.summary(retried)), { status: 202 });
     } catch (error) {
       return taskApiErrorResponse(error);
     }
@@ -224,30 +217,10 @@ export class TaskApi {
       const ownerEmail = taskOwnerFromRequest(request, this.env);
       const parsed = BatchDeleteRequestSchema.safeParse(await this.requestJson(request));
       if (!parsed.success) throw invalidInput();
-      const token = randomUUID();
-      const reservation = this.repository.reserveOwnedTerminalDeletionBatch(
-        ownerEmail,
-        parsed.data.ids,
-        token,
-      );
-      if (reservation.active) throw taskActive();
-      try {
-        for (const task of reservation.tasks) await this.deletePrivatePdf(task.pdfPath);
-      } catch (error) {
-        for (const task of reservation.tasks) {
-          this.repository.releaseOwnedTerminalDeletion(ownerEmail, task.id, token);
-        }
-        throw error;
-      }
-      try {
-        this.repository.deleteReservedOwnedTerminalBatch(ownerEmail, parsed.data.ids, token);
-      } catch (error) {
-        for (const task of reservation.tasks) {
-          this.repository.releaseOwnedTerminalDeletion(ownerEmail, task.id, token);
-        }
-        throw error;
-      }
-      return Response.json({ deleted: reservation.tasks.map((task) => task.id) });
+      const removed = this.repository.deleteOwnedTerminalPending(ownerEmail, parsed.data.ids, new Date().toISOString());
+      if (removed.active) throw taskActive();
+      for (const task of removed.tasks) await this.deletePendingPdf(task.pdfPath);
+      return Response.json({ deleted: removed.tasks.map((task) => task.id) });
     } catch (error) {
       return taskApiErrorResponse(error);
     }
@@ -260,6 +233,7 @@ export class TaskApi {
       if (!parsed.success) throw invalidInput();
       const tasks = parsed.data.tasks.map((task) => ({
         ...task,
+        id: `legacy-${createHash("sha256").update(`${ownerEmail}\0${task.id}`).digest("hex")}`,
         fileName: safeUploadedFileName(task.fileName),
       }));
       return Response.json({ imported: this.repository.importOwnedTerminal(ownerEmail, tasks) });
@@ -291,6 +265,14 @@ export class TaskApi {
       this.fileOperations,
     );
   }
+
+  private async deletePendingPdf(pdfPath: string | null): Promise<void> {
+    if (pdfPath === null) return;
+    try {
+      await this.deletePrivatePdf(pdfPath);
+      this.repository.markPendingPdfDeleted(pdfPath);
+    } catch { /* durable pending cleanup retries later */ }
+  }
 }
 
 export function createTaskApiForDataDir(dataDir: string, options: TaskApiFactoryOptions = {}): TaskApi {
@@ -303,7 +285,6 @@ export function createTaskApiForDataDir(dataDir: string, options: TaskApiFactory
       : { PDF_AUDIT_REQUIRE_AUTH: options.requireAuth ? "true" : "false" }),
   };
   const repository = new TaskRepository(database);
-  repository.releaseAllDeletionReservations();
   return new TaskApi(
     repository,
     dataDir,
@@ -318,7 +299,9 @@ let processTaskApi: TaskApi | undefined;
 
 export function taskApiFromEnv(env: NodeJS.ProcessEnv = process.env): TaskApi {
   if (!processTaskApi) {
-    const dataDir = env.PDF_AUDIT_DATA_DIR?.trim() || path.join(process.cwd(), ".pdf-audit");
+    const configured = env.PDF_AUDIT_DATA_DIR?.trim();
+    if (env.NODE_ENV === "production" && !configured) throw new Error("PDF_AUDIT_DATA_DIR is required in production.");
+    const dataDir = configured || path.join(process.cwd(), ".pdf-audit");
     processTaskApi = createTaskApiForDataDir(dataDir, { env });
   }
   return processTaskApi;

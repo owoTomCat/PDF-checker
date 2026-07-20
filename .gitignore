@@ -46,3 +46,5 @@ next-env.d.ts
 
 # local PDF samples
 /测试case/
+
+/.pdf-audit/

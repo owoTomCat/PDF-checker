@@ -33,6 +33,8 @@ export type CleanupRepository = {
   findExpiredPdfTasks: (now: string) => Array<{ id: string; pdfPath: string | null }>;
   markPdfDeleted: (id: string, now: string) => boolean;
   claimOrphanPdfDeletion: (pdfPath: string, now: string) => boolean;
+  findPendingPdfDeletions: () => string[];
+  markPendingPdfDeleted: (pdfPath: string) => void;
 };
 
 export type TaskFileOperations = {
@@ -61,6 +63,7 @@ export type CleanupResult = {
   deletedTaskPdfs: number;
   deletedOrphanPdfs: number;
   deletedUploadingFiles: number;
+  deletedPendingPdfs: number;
 };
 
 export function resolveTaskDataPaths(dataDir: string): TaskDataPaths {
@@ -224,6 +227,15 @@ export async function cleanupTaskFiles(input: {
   const operations = input.fileOperations ?? defaultTaskFileOperations;
   const { uploadDir } = resolveTaskDataPaths(input.dataDir);
   let deletedTaskPdfs = 0;
+  let deletedPendingPdfs = 0;
+  for (const pdfPath of input.repository.findPendingPdfDeletions()) {
+    if (!isInsideUploadDir(pdfPath, uploadDir)) continue;
+    try {
+      await deleteTaskPdf(pdfPath, uploadDir, operations);
+      input.repository.markPendingPdfDeleted(pdfPath);
+      deletedPendingPdfs += 1;
+    } catch { /* retain durable pending intent */ }
+  }
   for (const task of input.repository.findExpiredPdfTasks(input.now)) {
     if (task.pdfPath === null) continue;
     if (!isInsideUploadDir(task.pdfPath, uploadDir)) continue;
@@ -237,5 +249,5 @@ export async function cleanupTaskFiles(input: {
     now: input.now,
     operations,
   });
-  return { deletedTaskPdfs, ...stale };
+  return { deletedTaskPdfs, deletedPendingPdfs, ...stale };
 }

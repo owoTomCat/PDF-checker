@@ -109,6 +109,7 @@ test("cleanup removes expired terminal and stale unreferenced files without dele
   assert.equal(repository.getOwned("a@example.com", activeId)?.status, "queued");
   assert.deepEqual(result, {
     deletedTaskPdfs: 1,
+    deletedPendingPdfs: 0,
     deletedOrphanPdfs: 1,
     deletedUploadingFiles: 1,
   });
@@ -217,6 +218,7 @@ test("cleanup treats a disappearing stale candidate as idempotent", async (t) =>
 
   assert.deepEqual(result, {
     deletedTaskPdfs: 0,
+    deletedPendingPdfs: 0,
     deletedOrphanPdfs: 0,
     deletedUploadingFiles: 0,
   });

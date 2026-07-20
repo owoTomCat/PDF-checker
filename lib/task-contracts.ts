@@ -30,25 +30,25 @@ export const ActiveTaskStatusSchema = z.enum([
 ]);
 
 export const AuditTaskSummarySchema = z.object({
-  id: z.string(),
-  fileName: z.string(),
-  fileSize: z.number(),
+  id: z.string().min(1).max(200),
+  fileName: z.string().min(1).max(255),
+  fileSize: z.number().int().nonnegative(),
   fileType: z.string().nullable(),
   status: TaskStatusSchema,
   outcome: AuditOutcomeSchema.nullable(),
   model: z.literal("qwen3.7-plus").nullable(),
-  progress: z.number(),
-  processedPages: z.number(),
-  totalPages: z.number().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  startedAt: z.string().nullable(),
-  completedAt: z.string().nullable(),
+  progress: z.number().int().min(0).max(100),
+  processedPages: z.number().int().nonnegative(),
+  totalPages: z.number().int().min(1).max(80).nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+  startedAt: z.iso.datetime().nullable(),
+  completedAt: z.iso.datetime().nullable(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
-  issueCount: z.number().nullable(),
+  issueCount: z.number().int().nonnegative().nullable(),
   summary: StrictExtractionSummarySchema.nullable(),
-  pdfExpiresAt: z.string().nullable(),
+  pdfExpiresAt: z.iso.datetime().nullable(),
   pdfAvailable: z.boolean(),
 });
 
@@ -66,6 +66,8 @@ export const TaskListQuerySchema = z.object({
 }).transform((value) => ({
   ...value,
   query: value.query || undefined,
+  ...(value.createdFrom ? { createdFrom: new Date(value.createdFrom).toISOString() } : {}),
+  ...(value.createdTo ? { createdTo: new Date(value.createdTo).toISOString() } : {}),
 }));
 
 export const TaskImportRequestSchema = z.object({

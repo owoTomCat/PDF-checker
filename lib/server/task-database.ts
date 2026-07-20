@@ -81,23 +81,10 @@ export function openTaskDatabase(dataDir: string): DatabaseSync {
         .prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)")
         .run(2, new Date().toISOString());
     }
-    const deletionReservationMigration = database
-      .prepare("SELECT version FROM schema_migrations WHERE version = ?")
-      .get(3);
-    if (!deletionReservationMigration) {
-      database.exec(`
-        ALTER TABLE audit_tasks ADD COLUMN deletion_token TEXT;
-        CREATE INDEX IF NOT EXISTS audit_tasks_deletion_token
-          ON audit_tasks(deletion_token);
-      `);
-      database
-        .prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)")
-        .run(3, new Date().toISOString());
-    }
-    const deletionLeaseMigration = database.prepare("SELECT version FROM schema_migrations WHERE version = ?").get(4);
-    if (!deletionLeaseMigration) {
-      database.exec("ALTER TABLE audit_tasks ADD COLUMN deletion_reserved_at TEXT;");
-      database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(4, new Date().toISOString());
+    const pendingDeletionMigration = database.prepare("SELECT version FROM schema_migrations WHERE version = ?").get(5);
+    if (!pendingDeletionMigration) {
+      database.exec("CREATE TABLE IF NOT EXISTS pending_pdf_deletions (pdf_path TEXT PRIMARY KEY, queued_at TEXT NOT NULL) STRICT;");
+      database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(5, new Date().toISOString());
     }
     database.exec("COMMIT");
   } catch (error) {
