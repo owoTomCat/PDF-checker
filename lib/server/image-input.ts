@@ -4,6 +4,7 @@ import {
   MAX_BATCH_IMAGE_BYTES,
   MAX_PAGE_IMAGE_BYTES,
 } from "../ai/contracts";
+import { AuditGatewayInputError } from "./bailian-audit-gateway";
 import { BailianClientError } from "./bailian-client";
 import { RequestGuardError } from "./request-guards";
 
@@ -84,7 +85,6 @@ function assertDeclaredBodyWithinLimit(request: Request, maxBytes: number) {
 export async function parseImageBatchRequest<T>(
   request: Request,
   metadataSchema: z.ZodType<T>,
-  expectedImageCount: (metadata: T) => number,
 ) {
   assertDeclaredBodyWithinLimit(request, MAX_MODEL_MULTIPART_BODY_BYTES);
 
@@ -123,14 +123,6 @@ export async function parseImageBatchRequest<T>(
     throw new RouteInputError("INVALID_IMAGE", 422, "图片字段格式无效。");
   }
   const files = values as File[];
-  if (files.length !== expectedImageCount(parsedMetadata.data)) {
-    throw new RouteInputError(
-      "INVALID_INPUT",
-      422,
-      "图片数量与阶段元数据不匹配。",
-    );
-  }
-
   const totalImageBytes = files.reduce((sum, file) => sum + file.size, 0);
   if (totalImageBytes > MAX_BATCH_IMAGE_BYTES) {
     throw new RouteInputError(
@@ -202,7 +194,11 @@ export function modelRouteErrorResponse(
   error: unknown,
   fallbackMessage: string,
 ) {
-  if (error instanceof RequestGuardError || error instanceof RouteInputError) {
+  if (
+    error instanceof RequestGuardError ||
+    error instanceof RouteInputError ||
+    error instanceof AuditGatewayInputError
+  ) {
     return NextResponse.json(
       { error: { code: error.code, message: error.message } },
       { status: error.status },

@@ -69,6 +69,15 @@ test("rejects non-PDF and oversized files before rendering", () => {
 test("orchestrates isolated stages in strict order and aggregates warnings", async () => {
   const calls: string[] = [];
   const progressStages = new Set<string>();
+  let releaseFirstProgress!: () => void;
+  let observeFirstProgress!: () => void;
+  const firstProgressGate = new Promise<void>((resolve) => {
+    releaseFirstProgress = resolve;
+  });
+  const firstProgressObserved = new Promise<void>((resolve) => {
+    observeFirstProgress = resolve;
+  });
+  let firstProgressPending = true;
   let destroyed = false;
   let finalBody: StrictFinalizeRequest | undefined;
   const document: RenderedPdfDocument = {
@@ -146,7 +155,7 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
     },
   };
 
-  const result = await runAuditPipeline({
+  const resultPromise = runAuditPipeline({
     fileName: "example.pdf",
     fileSize: 16,
     fileType: "application/pdf",
@@ -154,8 +163,17 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
     gateway,
     async onProgress(progress) {
       progressStages.add(progress.stage);
+      if (firstProgressPending) {
+        firstProgressPending = false;
+        observeFirstProgress();
+        await firstProgressGate;
+      }
     },
   });
+  await firstProgressObserved;
+  assert.deepEqual(calls, []);
+  releaseFirstProgress();
+  const result = await resultPromise;
 
   assert.deepEqual(calls, [
     "render:1",
@@ -310,4 +328,41 @@ test("destroys the PDF document when its page count exceeds the limit", async ()
     /80 页/,
   );
   assert.equal(destroyed, true);
+});
+
+test("destroys an already-supplied PDF when file metadata is invalid", async () => {
+  const invalidFiles = [
+    { fileName: "notes.txt", fileSize: 16, fileType: "text/plain" },
+    { fileName: "empty.pdf", fileSize: 0, fileType: "application/pdf" },
+    {
+      fileName: "oversized.pdf",
+      fileSize: MAX_PDF_BYTES + 1,
+      fileType: "application/pdf",
+    },
+  ];
+
+  for (const metadata of invalidFiles) {
+    let destroyCount = 0;
+    const document: RenderedPdfDocument = {
+      pageCount: 1,
+      async renderPage() {
+        throw new Error("should not render");
+      },
+      async renderRegion() {
+        throw new Error("should not render");
+      },
+      async destroy() {
+        destroyCount += 1;
+      },
+    };
+
+    await assert.rejects(
+      runAuditPipeline({
+        ...metadata,
+        pdf: document,
+        gateway: {} as AuditStageGateway,
+      }),
+    );
+    assert.equal(destroyCount, 1, metadata.fileName);
+  }
 });

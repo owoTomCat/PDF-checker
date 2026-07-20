@@ -21,6 +21,16 @@ import {
 
 type BailianClient = ReturnType<typeof createBailianClient>;
 
+export class AuditGatewayInputError extends Error {
+  readonly code = "INVALID_INPUT";
+  readonly status = 422;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "AuditGatewayInputError";
+  }
+}
+
 async function blobDataUrl(blob: Blob) {
   const base64 = Buffer.from(await blob.arrayBuffer()).toString("base64");
   return `data:${blob.type};base64,${base64}`;
@@ -34,12 +44,38 @@ function invalidModelOutput(message: string): never {
   throw new BailianClientError("INVALID_MODEL_OUTPUT", message);
 }
 
+function invalidInput(message: string): never {
+  throw new AuditGatewayInputError(message);
+}
+
+function assertImageCount(images: RenderedImage[], expected: number) {
+  if (images.length !== expected) {
+    invalidInput("图片数量与阶段元数据不匹配。");
+  }
+}
+
+function requireClient(client: BailianClient | undefined) {
+  if (!client) {
+    throw new BailianClientError("CONFIG_ERROR", "百炼客户端未配置。");
+  }
+  return client;
+}
+
 export function createBailianAuditGateway(
-  client: BailianClient,
+  configuredClient?: BailianClient,
 ): AuditStageGateway {
   return {
     async locate(rawMetadata, images) {
       const metadata = LayoutRequestMetadataSchema.parse(rawMetadata);
+      const uniquePages = new Set(metadata.pageNumbers);
+      if (
+        uniquePages.size !== metadata.pageNumbers.length ||
+        metadata.pageNumbers.some((page) => page > metadata.totalPages)
+      ) {
+        invalidInput("页码重复或超出 PDF 页数。");
+      }
+      assertImageCount(images, metadata.pageNumbers.length);
+      const client = requireClient(configuredClient);
       const dataUrls = await imageDataUrls(images);
       const output = await client.locateRegions({
         fileName: metadata.fileName,
@@ -69,6 +105,27 @@ export function createBailianAuditGateway(
 
     async recognize(rawMetadata, images) {
       const metadata = EvidenceRequestMetadataSchema.parse(rawMetadata);
+      const regionIds = new Set(metadata.regions.map((region) => region.regionId));
+      const invalidMetadata =
+        regionIds.size !== metadata.regions.length ||
+        metadata.regions.some(
+          (region) =>
+            region.pageNumber > metadata.totalPages ||
+            (region.type === "certificate" &&
+              (region.rightsImageIndex !== null ||
+                region.resultIndex !== null ||
+                region.addressBarRegionId !== null)) ||
+            (region.type === "rights_screenshot" &&
+              (region.rightsImageIndex === null ||
+                region.resultIndex === null)),
+        );
+      if (invalidMetadata) {
+        invalidInput(
+          "证据区域元数据重复、越界或父子关系不完整。",
+        );
+      }
+      assertImageCount(images, metadata.regions.length);
+      const client = requireClient(configuredClient);
       const dataUrls = await imageDataUrls(images);
       const output = await client.recognizeEvidence({
         fileName: metadata.fileName,
@@ -132,6 +189,17 @@ export function createBailianAuditGateway(
 
     async reviewUrls(rawMetadata, images) {
       const metadata = UrlReviewRequestMetadataSchema.parse(rawMetadata);
+      const screenshotIds = new Set(
+        metadata.pairs.map((pair) => pair.screenshotId),
+      );
+      if (
+        screenshotIds.size !== metadata.pairs.length ||
+        metadata.pairs.some((pair) => pair.pageNumber > metadata.totalPages)
+      ) {
+        invalidInput("URL 复核记录重复或页码越界。");
+      }
+      assertImageCount(images, metadata.pairs.length * 2);
+      const client = requireClient(configuredClient);
       const dataUrls = await imageDataUrls(images);
       const output = await client.reviewUrls({
         fileName: metadata.fileName,
@@ -160,6 +228,15 @@ export function createBailianAuditGateway(
 
     async extractTable(rawMetadata, images) {
       const metadata = TableRequestMetadataSchema.parse(rawMetadata);
+      const regionIds = new Set(metadata.regions.map((region) => region.regionId));
+      if (
+        regionIds.size !== metadata.regions.length ||
+        metadata.regions.some((region) => region.pageNumber > metadata.totalPages)
+      ) {
+        invalidInput("表格区域重复或页码越界。");
+      }
+      assertImageCount(images, metadata.regions.length);
+      const client = requireClient(configuredClient);
       const dataUrls = await imageDataUrls(images);
       const output = await client.extractTable({
         fileName: metadata.fileName,
@@ -169,7 +246,6 @@ export function createBailianAuditGateway(
           dataUrl: dataUrls[index],
         })),
       });
-      const regionIds = new Set(metadata.regions.map((region) => region.regionId));
       const unexpectedRegion = [...output.headers, ...output.rows].some(
         (item) => !regionIds.has(item.regionId),
       );
@@ -187,6 +263,7 @@ export function createBailianAuditGateway(
 
     async associate(rawInput) {
       const input = AssociationRequestSchema.parse(rawInput);
+      const client = requireClient(configuredClient);
       const output = await client.associateRows(input);
       const expectedScreenshotIds = new Set(
         input.screenshots.map((item) => item.id),

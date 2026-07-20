@@ -120,6 +120,32 @@ test("layout API rejects a spoofed image before calling the model", async () => 
   }
 });
 
+test("layout API uses gateway validation for duplicate pages", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return modelResponse(strictLayout);
+  };
+
+  try {
+    const response = await locateRegions(
+      multipartRequest(
+        "/api/audit/layout",
+        { fileName: "example.pdf", totalPages: 1, pageNumbers: [1, 1] },
+        [jpeg("page-1.jpg"), jpeg("page-1-duplicate.jpg")],
+      ),
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 422);
+    assert.equal(body.error.code, "INVALID_INPUT");
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("evidence and table APIs reject metadata from the other stage", async () => {
   const evidenceResponse = await recognizeEvidence(
     multipartRequest(
@@ -538,7 +564,13 @@ test("layout API rejects an oversized declared body before multipart parsing", a
 
 test("finalize API is deterministic and does not call the model", async () => {
   const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.DASHSCOPE_API_KEY;
+  const originalBaseUrl = process.env.DASHSCOPE_BASE_URL;
+  const originalModel = process.env.QWEN_MODEL;
   let called = false;
+  delete process.env.DASHSCOPE_API_KEY;
+  process.env.DASHSCOPE_BASE_URL = "not-a-url";
+  process.env.QWEN_MODEL = "not-qwen";
   globalThis.fetch = async () => {
     called = true;
     throw new Error("finalize must not call fetch");
@@ -562,6 +594,9 @@ test("finalize API is deterministic and does not call the model", async () => {
     assert.equal(called, false);
   } finally {
     globalThis.fetch = originalFetch;
+    process.env.DASHSCOPE_API_KEY = originalApiKey;
+    process.env.DASHSCOPE_BASE_URL = originalBaseUrl;
+    process.env.QWEN_MODEL = originalModel;
   }
 });
 

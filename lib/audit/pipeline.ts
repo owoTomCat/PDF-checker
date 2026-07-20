@@ -143,14 +143,14 @@ export async function runAuditPipeline(options: {
   gateway: AuditStageGateway;
   onProgress?: (progress: PipelineProgress) => void | Promise<void>;
 }): Promise<StrictFinalAuditResponse> {
-  validatePdfFile({
-    name: options.fileName,
-    size: options.fileSize,
-    type: options.fileType,
-  });
   const { gateway, pdf } = options;
 
   try {
+    validatePdfFile({
+      name: options.fileName,
+      size: options.fileSize,
+      type: options.fileType,
+    });
     if (pdf.pageCount > MAX_PDF_PAGES) {
       throw new Error(`PDF 超过 ${MAX_PDF_PAGES} 页限制。`);
     }

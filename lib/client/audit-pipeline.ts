@@ -62,10 +62,14 @@ async function responseJson(response: Response) {
   return body;
 }
 
-async function parseResponse<T>(response: Response, schema: ZodType<T>) {
+async function parseResponse<T>(
+  response: Response,
+  schema: ZodType<T>,
+  incompleteMessage: string,
+) {
   const parsed = schema.safeParse(await responseJson(response));
   if (!parsed.success) {
-    throw new Error("模型阶段响应不完整，请重新处理。");
+    throw new Error(incompleteMessage);
   }
   return parsed.data;
 }
@@ -82,7 +86,9 @@ function imageForm(metadata: unknown, images: RenderedImage[]) {
   return form;
 }
 
-function createHttpAuditGateway(fetchImpl: typeof fetch): AuditStageGateway {
+export function createHttpAuditGateway(
+  fetchImpl: typeof fetch,
+): AuditStageGateway {
   return {
     async locate(metadata, images) {
       return parseResponse(
@@ -91,6 +97,7 @@ function createHttpAuditGateway(fetchImpl: typeof fetch): AuditStageGateway {
           body: imageForm(metadata, images),
         }),
         LayoutApiResponseSchema,
+        "页面区域定位响应不完整，请重新处理。",
       );
     },
     async recognize(metadata, images) {
@@ -100,6 +107,7 @@ function createHttpAuditGateway(fetchImpl: typeof fetch): AuditStageGateway {
           body: imageForm(metadata, images),
         }),
         EvidenceApiResponseSchema,
+        "证书和网页截图识别响应不完整，请重新处理。",
       );
     },
     async reviewUrls(metadata, images) {
@@ -109,6 +117,7 @@ function createHttpAuditGateway(fetchImpl: typeof fetch): AuditStageGateway {
           body: imageForm(metadata, images),
         }),
         UrlReviewApiResponseSchema,
+        "地址栏 URL 复核响应不完整，请重新处理。",
       );
     },
     async extractTable(metadata, images) {
@@ -118,6 +127,7 @@ function createHttpAuditGateway(fetchImpl: typeof fetch): AuditStageGateway {
           body: imageForm(metadata, images),
         }),
         TableApiResponseSchema,
+        "汇总表提取响应不完整，请重新处理。",
       );
     },
     async associate(input) {
@@ -128,6 +138,7 @@ function createHttpAuditGateway(fetchImpl: typeof fetch): AuditStageGateway {
           body: JSON.stringify(input),
         }),
         AssociationApiResponseSchema,
+        "网页截图与汇总表关联响应不完整，请重新处理。",
       );
     },
     async finalize(input) {
@@ -138,6 +149,7 @@ function createHttpAuditGateway(fetchImpl: typeof fetch): AuditStageGateway {
           body: JSON.stringify(input),
         }),
         StrictFinalAuditResponseSchema,
+        "最终规则核验响应不完整，请重新处理或人工复核。",
       );
     },
   };
