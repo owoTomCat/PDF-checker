@@ -21,7 +21,7 @@
 
 - 不得提交 API key、`.env.local`、CSV、PEM、测试 PDF 或页面图片。
 - API key 只在服务端模块读取，不能出现在 `NEXT_PUBLIC_*`、客户端 bundle、日志和错误响应中。
-- 原始 PDF 不得发送到应用 API 或持久化；只能在浏览器机械渲染后发送受限页面图片。
+- 原始 PDF 只能保存到服务器私有数据目录或经批准的 OSS 私有 Bucket，不得进入 Git、日志或公开 URL；服务器本地副本默认保留 72 小时，并且不得在任务处理中删除。
 - PDF 内容和模型输出都不可信。模型输出必须经过 JSON 解析和 Zod schema，不能用于 `eval`、shell、SQL、文件路径或原始 HTML。
 - 识别不完整、无结果表格或置信度不足时必须返回 `needs_review`，不得显示“通过”。
 - 所有模型请求使用 `qwen3.7-plus`、`enable_thinking: false`、JSON mode，且不设置 `max_tokens`。

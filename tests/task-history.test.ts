@@ -24,9 +24,12 @@ function task(id: string, fileName: string, createdAt: Date): AuditTaskDetail {
     updatedAt: timestamp,
     startedAt: timestamp,
     completedAt: timestamp,
+    errorCode: null,
     errorMessage: null,
     issueCount: 0,
     summary: null,
+    pdfExpiresAt: null,
+    pdfAvailable: false,
     reportText: null,
     report: null,
   };

@@ -101,12 +101,17 @@ function normalizeStoredTask(value: unknown): AuditTaskDetail | null {
     startedAt: typeof task.startedAt === "string" ? task.startedAt : null,
     completedAt:
       typeof task.completedAt === "string" ? task.completedAt : null,
+    errorCode:
+      typeof task.errorCode === "string" ? task.errorCode.slice(0, 100) : null,
     errorMessage:
       typeof task.errorMessage === "string"
         ? task.errorMessage.slice(0, 1_000)
         : null,
     issueCount: typeof task.issueCount === "number" ? task.issueCount : null,
     summary: task.summary ?? null,
+    pdfExpiresAt:
+      typeof task.pdfExpiresAt === "string" ? task.pdfExpiresAt : null,
+    pdfAvailable: task.pdfAvailable === true,
     reportText:
       typeof task.reportText === "string"
         ? task.reportText.slice(0, 1_000_000)
@@ -152,9 +157,12 @@ function createQueuedTask(file: File): AuditTaskDetail {
     updatedAt: now,
     startedAt: null,
     completedAt: null,
+    errorCode: null,
     errorMessage: null,
     issueCount: null,
     summary: null,
+    pdfExpiresAt: null,
+    pdfAvailable: false,
     reportText: null,
     report: null,
   };
