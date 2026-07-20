@@ -331,6 +331,7 @@ export function useAuditTasks(filters: HistoryFilterOptions) {
           if (token) viewState.markDeleted(id, token);
         }
         publish();
+        setRefreshVersion((value) => value + 1);
         setNotice(`已删除 ${deleted.length} 条历史任务。`);
         return deleted;
       } catch (error) {

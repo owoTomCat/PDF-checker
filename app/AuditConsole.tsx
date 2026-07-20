@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuditTasks } from "@/app/useAuditTasks";
 import {
   ACTIVE_TASK_STATUSES,
+  getSelectedTaskDetailRequestKey,
   isActiveTask,
   removeCheckedTaskId,
 } from "@/lib/client/task-coordinator";
@@ -91,6 +92,8 @@ export function AuditConsole() {
     [filteredTasks, selectedId],
   );
   const selectedTaskId = selectedTask?.id ?? null;
+  const selectedTaskDetailRequestKey =
+    getSelectedTaskDetailRequestKey(selectedTask);
 
   const selectableFilteredIds = useMemo(
     () =>
@@ -114,8 +117,10 @@ export function AuditConsole() {
     selectableFilteredIds.every((id) => checkedTaskIds.has(id));
 
   useEffect(() => {
-    if (selectedTaskId) return loadTaskDetails(selectedTaskId);
-  }, [loadTaskDetails, selectedTaskId]);
+    if (selectedTaskDetailRequestKey && selectedTaskId) {
+      return loadTaskDetails(selectedTaskId);
+    }
+  }, [loadTaskDetails, selectedTaskDetailRequestKey, selectedTaskId]);
 
   const toggleAllFilteredTasks = useCallback(() => {
     setCheckedTaskIds((current) => {
@@ -265,6 +270,7 @@ export function AuditConsole() {
                 placeholder="输入 PDF 名称"
                 onChange={(event) => {
                   setHistoryQuery(event.currentTarget.value);
+                  setSelectedId(null);
                   setCheckedTaskIds(new Set());
                 }}
               />
@@ -279,6 +285,7 @@ export function AuditConsole() {
                     setHistoryDateFilter(
                       event.currentTarget.value as HistoryDateFilter,
                     );
+                    setSelectedId(null);
                     setCheckedTaskIds(new Set());
                   }}
                 >
@@ -298,6 +305,7 @@ export function AuditConsole() {
                       value={customStart}
                       onChange={(event) => {
                         setCustomStart(event.currentTarget.value);
+                        setSelectedId(null);
                         setCheckedTaskIds(new Set());
                       }}
                     />
@@ -309,6 +317,7 @@ export function AuditConsole() {
                       value={customEnd}
                       onChange={(event) => {
                         setCustomEnd(event.currentTarget.value);
+                        setSelectedId(null);
                         setCheckedTaskIds(new Set());
                       }}
                     />

@@ -5,6 +5,7 @@ import {
   TaskViewState,
   TaskPollingController,
   detailFromTaskSummary,
+  getSelectedTaskDetailRequestKey,
   isActiveTask,
   removeCheckedTaskId,
   runReleasingUploadQueue,
@@ -99,6 +100,42 @@ test("summary conversion preserves a report only for the identical terminal snap
     detailFromTaskSummary({ ...sameSummary, id: "other-task" }, previous)
       .reportText,
     null,
+  );
+});
+
+test("selected terminal snapshots request detail once per status and update", () => {
+  const active = task("one", "2026-07-20T00:02:00.000Z", 40);
+  assert.equal(getSelectedTaskDetailRequestKey(active), null);
+
+  const terminalSummary = task("one", "2026-07-20T00:03:00.000Z", 100);
+  const firstKey = getSelectedTaskDetailRequestKey(terminalSummary);
+  assert.equal(typeof firstKey, "string");
+  assert.equal(getSelectedTaskDetailRequestKey({ ...terminalSummary }), firstKey);
+
+  const terminalDetail = {
+    ...terminalSummary,
+    reportText: "complete report",
+    report: {
+      certificateIssues: [],
+      resultIssues: [],
+      issues: [],
+      verificationNotices: [],
+    },
+  };
+  assert.equal(getSelectedTaskDetailRequestKey(terminalDetail), null);
+
+  const nextTerminal = {
+    ...terminalSummary,
+    updatedAt: "2026-07-20T00:04:00.000Z",
+  };
+  assert.notEqual(getSelectedTaskDetailRequestKey(nextTerminal), firstKey);
+  assert.notEqual(
+    getSelectedTaskDetailRequestKey({
+      ...terminalSummary,
+      status: "failed",
+      outcome: "failed",
+    }),
+    firstKey,
   );
 });
 
@@ -351,6 +388,23 @@ test("stale list rows and deleted tombstones cannot resurrect pre-action state",
   assert.deepEqual(state.visibleTasks(), []);
 });
 
+test("a fresh list refills a bounded view after deletion without reviving the tombstone", () => {
+  const state = new TaskViewState();
+  const first = task("first", "2026-07-20T00:03:00.000Z", 100);
+  const second = task("second", "2026-07-20T00:02:00.000Z", 100);
+  const refill = task("refill", "2026-07-20T00:01:00.000Z", 100);
+  state.completeList([first, second], state.beginList({ limit: 2 }));
+  const deletion = state.beginAction(first.id);
+  state.markDeleted(first.id, deletion);
+
+  const refreshed = state.beginList({ limit: 2 });
+  state.completeList([first, second, refill], refreshed);
+  assert.deepEqual(
+    state.visibleTasks().map((value) => value.id),
+    ["second", "refill"],
+  );
+});
+
 test("a list started during retry cannot replace the later queued response", () => {
   const state = new TaskViewState();
   const failed = {
@@ -486,6 +540,27 @@ test("a matching upload remains visible when an older bounded list completes aft
   );
 });
 
+test("repeated list filters keep the task cache bounded while preserving the current view", () => {
+  const state = new TaskViewState();
+  const allIds: string[] = [];
+  for (let batch = 0; batch < 6; batch += 1) {
+    const rows = Array.from({ length: 80 }, (_, index) => {
+      const id = `batch-${batch}-task-${index}`;
+      allIds.push(id);
+      return {
+        ...task(id, `2026-07-20T0${batch}:00:00.000Z`, 100),
+        reportText: "x".repeat(10_000),
+      };
+    });
+    state.completeList(rows, state.beginList({ limit: 80 }));
+  }
+
+  const retainedCount = allIds.filter((id) => state.task(id)).length;
+  assert.equal(state.visibleTasks().length, 80);
+  assert.equal(state.visibleTasks()[0]?.id.startsWith("batch-5-"), true);
+  assert.equal(retainedCount <= 240, true);
+});
+
 test("local filtering treats percent as the server SQL LIKE multi-character wildcard", () => {
   const state = new TaskViewState();
   state.beginList({ query: "report%2026", limit: 80 });
@@ -522,6 +597,28 @@ test("local SQL LIKE filtering treats regex syntax as literal text", () => {
   state.applyAction(literal, state.beginAction(literal.id), true);
   state.applyAction(notLiteral, state.beginAction(notLiteral.id), true);
   assert.deepEqual(state.visibleTasks().map((value) => value.id), ["literal"]);
+});
+
+test("local SQL LIKE filtering folds ASCII case like SQLite NOCASE", () => {
+  const state = new TaskViewState();
+  state.beginList({ query: "ALPHA", limit: 80 });
+  const matching = {
+    ...task("ascii", "2026-07-20T00:01:00.000Z", 100),
+    fileName: "alpha-report.pdf",
+  };
+  state.applyAction(matching, state.beginAction(matching.id), true);
+  assert.deepEqual(state.visibleTasks().map((value) => value.id), ["ascii"]);
+});
+
+test("local SQL LIKE filtering does not fold non-ASCII case", () => {
+  const state = new TaskViewState();
+  state.beginList({ query: "Ä", limit: 80 });
+  const notMatching = {
+    ...task("unicode", "2026-07-20T00:01:00.000Z", 100),
+    fileName: "ä-report.pdf",
+  };
+  state.applyAction(notMatching, state.beginAction(notMatching.id), true);
+  assert.deepEqual(state.visibleTasks(), []);
 });
 
 function isActive(value: AuditTaskDetail | undefined) {

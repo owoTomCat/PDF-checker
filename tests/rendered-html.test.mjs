@@ -79,9 +79,40 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   );
   assert.match(taskHookSource, /tasks\.filter\(isActiveTask\)/);
   assert.doesNotMatch(taskCoordinatorSource, /mergeTaskByFreshness/);
+  assert.match(
+    taskHookSource,
+    /publish\(\);\s*setRefreshVersion\(\(value\) => value \+ 1\);\s*setNotice\(`/,
+  );
   assert.match(consoleSource, /event\.currentTarget\.value = ""/);
   assert.match(consoleSource, /removeCheckedTaskId\(current, selectedTask\.id\)/);
-  assert.match(consoleSource, /return loadTaskDetails\(selectedTaskId\)/);
+  assert.match(
+    consoleSource,
+    /const selectedTaskDetailRequestKey =\s*getSelectedTaskDetailRequestKey\(selectedTask\)/,
+  );
+  assert.match(
+    consoleSource,
+    /if \(selectedTaskDetailRequestKey && selectedTaskId\) \{\s*return loadTaskDetails\(selectedTaskId\);\s*\}/,
+  );
+  assert.match(
+    consoleSource,
+    /\[loadTaskDetails, selectedTaskDetailRequestKey, selectedTaskId\]/,
+  );
+  assert.match(
+    consoleSource,
+    /setHistoryQuery\(event\.currentTarget\.value\);\s*setSelectedId\(null\);\s*setCheckedTaskIds\(new Set\(\)\)/,
+  );
+  assert.match(
+    consoleSource,
+    /setHistoryDateFilter\([\s\S]*?\);\s*setSelectedId\(null\);\s*setCheckedTaskIds\(new Set\(\)\)/,
+  );
+  assert.match(
+    consoleSource,
+    /setCustomStart\(event\.currentTarget\.value\);\s*setSelectedId\(null\);\s*setCheckedTaskIds\(new Set\(\)\)/,
+  );
+  assert.match(
+    consoleSource,
+    /setCustomEnd\(event\.currentTarget\.value\);\s*setSelectedId\(null\);\s*setCheckedTaskIds\(new Set\(\)\)/,
+  );
   assert.match(auditPipelineSource, /export async function runAuditPipeline/);
   assert.doesNotMatch(
     auditPipelineSource,

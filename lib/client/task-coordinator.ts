@@ -35,6 +35,19 @@ export function detailFromTaskSummary(
   };
 }
 
+export function getSelectedTaskDetailRequestKey(
+  task: AuditTaskDetail | null | undefined,
+) {
+  if (
+    !task ||
+    isActiveTask(task) ||
+    (task.reportText !== null && task.report !== null)
+  ) {
+    return null;
+  }
+  return JSON.stringify([task.id, task.status, task.outcome, task.updatedAt]);
+}
+
 export function removeCheckedTaskId(ids: ReadonlySet<string>, id: string) {
   const next = new Set(ids);
   next.delete(id);
@@ -171,6 +184,8 @@ export type VisibleTaskFilters = {
   limit?: number;
 };
 
+const MAX_TASK_CACHE_SIZE = 240;
+
 export type TaskReadToken = {
   id: string;
   generation: number;
@@ -207,6 +222,10 @@ const REGEX_SPECIAL_CHARACTERS = new Set([
   "|",
 ]);
 
+function foldAsciiCase(value: string) {
+  return value.replace(/[A-Z]/g, (character) => character.toLowerCase());
+}
+
 function matchesServerLikeSubstring(value: string, query: string) {
   let source = "";
   for (const character of query) {
@@ -215,12 +234,11 @@ function matchesServerLikeSubstring(value: string, query: string) {
     } else if (character === "_") {
       source += ".";
     } else {
-      source += REGEX_SPECIAL_CHARACTERS.has(character)
-        ? `\\${character}`
-        : character;
+      const folded = foldAsciiCase(character);
+      source += REGEX_SPECIAL_CHARACTERS.has(folded) ? `\\${folded}` : folded;
     }
   }
-  return new RegExp(source, "isu").test(value);
+  return new RegExp(source, "su").test(foldAsciiCase(value));
 }
 
 function taskMatchesFilters(
@@ -289,12 +307,13 @@ export class TaskViewState {
     ) {
       return false;
     }
-    this.cache.set(task.id, task);
+    this.storeTask(task);
     this.lastAppliedReadSequences.set(task.id, token.readSequence);
     if (this.visibleIds.includes(task.id)) {
       if (taskMatchesFilters(task, this.filters)) this.normalizeVisible();
       else this.visibleIds = this.visibleIds.filter((id) => id !== task.id);
     }
+    this.pruneCache();
     return true;
   }
 
@@ -303,7 +322,7 @@ export class TaskViewState {
       return false;
     }
     this.tombstones.delete(task.id);
-    this.cache.set(task.id, task);
+    this.storeTask(task);
     this.generations.set(task.id, token.generation + 1);
     this.mutationVersions.set(task.id, ++this.stateVersion);
     const wasVisible = this.visibleIds.includes(task.id);
@@ -314,6 +333,7 @@ export class TaskViewState {
     } else if (wasVisible) {
       this.visibleIds = this.visibleIds.filter((id) => id !== task.id);
     }
+    this.pruneCache();
     return true;
   }
 
@@ -335,7 +355,7 @@ export class TaskViewState {
         }
         continue;
       }
-      this.cache.set(task.id, task);
+      this.storeTask(task);
       this.lastAppliedReadSequences.set(task.id, read.readSequence);
       if (taskMatchesFilters(task, read.filters)) nextIds.push(task.id);
     }
@@ -348,6 +368,7 @@ export class TaskViewState {
     }
     this.visibleIds = nextIds;
     this.normalizeVisible();
+    this.pruneCache();
     return this.visibleTasks();
   }
 
@@ -369,7 +390,9 @@ export class TaskViewState {
   }
 
   task(id: string) {
-    return this.cache.get(id);
+    const task = this.cache.get(id);
+    if (task) this.storeTask(task);
+    return task;
   }
 
   private currentGeneration(id: string) {
@@ -378,6 +401,25 @@ export class TaskViewState {
 
   private accepts(id: string, generation: number) {
     return !this.tombstones.has(id) && this.currentGeneration(id) === generation;
+  }
+
+  private storeTask(task: AuditTaskDetail) {
+    this.cache.delete(task.id);
+    this.cache.set(task.id, task);
+  }
+
+  private pruneCache() {
+    if (this.cache.size <= MAX_TASK_CACHE_SIZE) return;
+    const visible = new Set(this.visibleIds);
+    const evict = (includeActive: boolean) => {
+      for (const [id, task] of this.cache) {
+        if (this.cache.size <= MAX_TASK_CACHE_SIZE) return;
+        if (visible.has(id) || (!includeActive && isActiveTask(task))) continue;
+        this.cache.delete(id);
+      }
+    };
+    evict(false);
+    evict(true);
   }
 
   private normalizeVisible() {
@@ -389,7 +431,7 @@ export class TaskViewState {
     const requestedLimit = this.filters.limit;
     const limit =
       Number.isSafeInteger(requestedLimit) && (requestedLimit ?? 0) > 0
-        ? requestedLimit!
+        ? Math.min(requestedLimit!, 200)
         : 80;
     this.visibleIds = this.visibleIds.slice(0, limit);
   }
