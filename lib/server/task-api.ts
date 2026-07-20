@@ -22,7 +22,21 @@ import { openTaskDatabase } from "./task-database";
 import { InvalidTaskCursorError, TASK_FAILURE_MESSAGES, TaskRepository } from "./task-repository";
 import { taskOwnerFromRequest } from "./task-owner";
 
-const PDF_RETENTION_MS = 72 * 60 * 60 * 1_000;
+export const DEFAULT_PDF_RETENTION_HOURS = 72;
+const MAX_PDF_RETENTION_HOURS = 8_760;
+
+export function parsePdfRetentionHours(
+  value: string | number | undefined,
+): number {
+  if (value === undefined) return DEFAULT_PDF_RETENTION_HOURS;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_PDF_RETENTION_HOURS) {
+    throw new Error(
+      `PDF_AUDIT_PDF_RETENTION_HOURS must be an integer from 1 through ${MAX_PDF_RETENTION_HOURS}.`,
+    );
+  }
+  return parsed;
+}
 
 class TaskApiError extends Error {
   constructor(
@@ -105,6 +119,7 @@ export class TaskApi {
     private readonly database?: DatabaseSync,
     private readonly createId: () => string = randomUUID,
     private readonly fileOperations?: TaskFileOperations,
+    private readonly pdfRetentionHours = DEFAULT_PDF_RETENTION_HOURS,
   ) {}
 
   dispose(): void {
@@ -137,7 +152,9 @@ export class TaskApi {
         fileSize: file.size,
         fileType: file.type || null,
         pdfPath,
-        pdfExpiresAt: new Date(now.getTime() + PDF_RETENTION_MS).toISOString(),
+        pdfExpiresAt: new Date(
+          now.getTime() + this.pdfRetentionHours * 60 * 60 * 1_000,
+        ).toISOString(),
         now: now.toISOString(),
       });
       committed = true;
@@ -284,7 +301,6 @@ export class TaskApi {
 }
 
 export function createTaskApiForDataDir(dataDir: string, options: TaskApiFactoryOptions = {}): TaskApi {
-  const database = openTaskDatabase(dataDir);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...options.env,
@@ -292,6 +308,10 @@ export function createTaskApiForDataDir(dataDir: string, options: TaskApiFactory
       ? {}
       : { PDF_AUDIT_REQUIRE_AUTH: options.requireAuth ? "true" : "false" }),
   };
+  const pdfRetentionHours = parsePdfRetentionHours(
+    env.PDF_AUDIT_PDF_RETENTION_HOURS,
+  );
+  const database = openTaskDatabase(dataDir);
   const repository = new TaskRepository(database);
   return new TaskApi(
     repository,
@@ -300,6 +320,7 @@ export function createTaskApiForDataDir(dataDir: string, options: TaskApiFactory
     database,
     options.createId,
     options.fileOperations,
+    pdfRetentionHours,
   );
 }
 

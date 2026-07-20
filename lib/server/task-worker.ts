@@ -42,6 +42,7 @@ export type TaskWorkerRepository = CleanupRepository & {
   updateProgress: (input: UpdateProgressInput) => Awaitable<unknown>;
   complete: (input: CompleteTaskInput) => Awaitable<unknown>;
   fail: (input: FailTaskInput) => Awaitable<unknown>;
+  requeueClaimAfterShutdown: (id: string, now: string) => Awaitable<boolean>;
 };
 
 type WorkerLogger = {
@@ -399,6 +400,7 @@ export class TaskWorker {
         fileType: task.fileType,
         pdf,
         gateway: this.gateway,
+        signal: this.controller.signal,
         onProgress: async (progress: PipelineProgress) => {
           stage = progress.stage;
           await this.repository.updateProgress({
@@ -415,6 +417,9 @@ export class TaskWorker {
       if (!parsedResult.success) {
         throw new TaskProcessingError("INVALID_MODEL_OUTPUT");
       }
+      if (this.controller.signal.aborted) {
+        throw this.controller.signal.reason;
+      }
       stage = "completing";
       await this.repository.complete({
         id: task.id,
@@ -422,6 +427,10 @@ export class TaskWorker {
         now: this.now(),
       });
     } catch (error) {
+      if (this.controller.signal.aborted) {
+        await this.repository.requeueClaimAfterShutdown(task.id, this.now());
+        return;
+      }
       const code = normalizeWorkerFailure(error);
       try {
         await this.repository.fail({

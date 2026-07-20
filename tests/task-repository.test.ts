@@ -73,6 +73,33 @@ test("restart recovery requeues twice and fails the third interrupted claim", as
   assert.equal(task?.errorCode, "WORKER_RETRY_EXHAUSTED");
 });
 
+test("cooperative shutdown requeues only its active claim without consuming an attempt", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-shutdown-requeue-"));
+  const db = openTaskDatabase(root);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = new TaskRepository(db);
+  repository.create({
+    id: "shutdown-task",
+    ownerEmail: "a@example.com",
+    fileName: "a.pdf",
+    fileSize: 10,
+    fileType: "application/pdf",
+    pdfPath: path.join(root, "shutdown-task.pdf"),
+    pdfExpiresAt: "2026-07-23T00:00:00.000Z",
+    now: "2026-07-20T00:00:00.000Z",
+  });
+  repository.claimNext("2026-07-20T00:01:00.000Z");
+  assert.equal(repository.requeueClaimAfterShutdown("shutdown-task", "2026-07-20T00:02:00.000Z"), true);
+  const task = repository.getOwnedWorker("a@example.com", "shutdown-task");
+  assert.equal(task?.status, "queued");
+  assert.equal(task?.progress, 0);
+  assert.equal(task?.processedPages, 0);
+  assert.equal(task?.errorCode, null);
+  assert.equal(task?.attemptCount, 0);
+  assert.equal(repository.requeueClaimAfterShutdown("shutdown-task", "2026-07-20T00:03:00.000Z"), false);
+});
+
 test("cleanup never reserves queued work after its retained PDF expires", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-cleanup-race-"));
   const db = openTaskDatabase(root);

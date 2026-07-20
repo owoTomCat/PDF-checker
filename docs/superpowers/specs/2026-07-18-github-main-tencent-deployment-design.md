@@ -16,6 +16,7 @@ Nginx 监听 IPv4/IPv6 80 端口并代理到 web 服务，`client_max_body_size 
 - 使用 Node 24（满足项目声明的 `>=22.13.0`）与 npm。
 - 运行 `npm ci && npm run build`；发布产物必须同时包含 web 构建和 `dist/audit-worker.mjs`。
 - 在 Linux 上确认 `@napi-rs/canvas` 的原生依赖可由生产 Node 加载。
+- 确认 `command -v sqlite3` 可用；在线数据库备份和安全的队列计数检查依赖该 CLI。Ubuntu 缺少时先由管理员安装 `sqlite3` 软件包。
 - 百炼连接配置只保存在服务器 `/etc/pdf-checker.env`；不写入 Git、systemd unit、文档、日志或接口响应。
 
 ## 私有数据目录和 systemd 安装
@@ -65,6 +66,16 @@ sudo systemctl enable --now pdf-checker.service pdf-checker-worker.service
 
 web 不依赖 worker 成功启动；worker 暂时不可用时，web 仍可接收上传、显示任务历史和状态，worker 恢复后继续领取队列。
 
+web unit 使用受控的 `--hostname 127.0.0.1` 参数，因此 3000 只应由 Nginx 访问。部署验收必须确认监听地址没有暴露到公网：
+
+```bash
+sudo ss -ltnp | grep ':3000'
+```
+
+输出只允许 `127.0.0.1:3000`（若启用 IPv6 loopback，则仅 `::1:3000`）。
+
+当前 Nginx 显式清空请求中的 `oai-authenticated-user-email`，因此当前配置不支持认证模式，不能只把 `PDF_AUDIT_REQUIRE_AUTH` 切为 `true`。未来可信认证代理必须先认证、拒绝或清除客户端传入的伪造头，再使用代理控制的不可伪造变量覆盖该头，并继续封闭 3000 端口到 loopback。
+
 ## 状态、日志与健康检查
 
 先验证 unit 和 Nginx，再分别检查服务。日志必须有上限，不能打印环境文件、PDF 内容、渲染图、原始模型响应、认证头或完整报告。
@@ -86,6 +97,8 @@ sudo du -sh /var/lib/pdf-checker
 ## 数据保留、备份和恢复
 
 worker 会在启动及周期性清理中删除超过 72 小时的终态 PDF，不会删除 queued 或 active PDF。验证清理时检查 `pdf_deleted_at` 和文件计数变化，同时确认任务结果仍可查询；不要通过人工删除活动任务来测试。
+
+停止时 worker 不再领取任务，并把协作式中止的 active claim 重新入队且撤销本次 claim 计数；正常应远小于 `TimeoutStopSec=120`。PDF 原生渲染不能保证立刻可中断，120 秒是协作清理超时后 systemd 才发送 SIGKILL 的最后上限。Ubuntu 验收需要在实际长任务中停止 worker，并确认任务 queued 且没有耗尽恢复额度。
 
 SQLite 运行时采用 WAL，禁止对活跃数据库进行裸 `cp`。推荐在线 SQLite 备份：
 
@@ -115,3 +128,5 @@ sudo systemctl restart pdf-checker-worker.service
 ```
 
 此顺序允许 web 先独立恢复，而 worker 随后处理积压任务。回滚只切换代码和重启服务，不覆盖 `/var/lib/pdf-checker`；完成后重跑 unit、服务、bounded journal、HTTP、队列计数、权限和容量检查。
+
+回滚前必须检查目标提交的 SQLite schema 和 worker 任务状态是否与当前 `/var/lib/pdf-checker` 兼容。若不兼容，停止两个服务并从已经验证的 SQLite 备份及必要私有数据恢复，不能把较新的数据库直接交给较旧 worker。

@@ -390,3 +390,29 @@ test(
     });
   },
 );
+
+test("an external worker abort stops fetch immediately and does not consume a retry", async () => {
+  let calls = 0;
+  let observedAbort = false;
+  const controller = new AbortController();
+  const client = clientWithFetch(async (_url, init) => {
+    calls += 1;
+    return await new Promise<Response>((resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        observedAbort = true;
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true });
+      setTimeout(() => resolve(modelResponse(strictLayout)), 20);
+    });
+  });
+  const request = client.locateRegions(layoutInput, controller.signal);
+  controller.abort("worker stopped");
+  await assert.rejects(request, (error: unknown) => {
+    assert.equal(error instanceof BailianClientError, true);
+    assert.equal((error as BailianClientError).code, "ABORTED");
+    assert.equal((error as BailianClientError).retryable, false);
+    return true;
+  });
+  assert.equal(observedAbort, true);
+  assert.equal(calls, 1);
+});

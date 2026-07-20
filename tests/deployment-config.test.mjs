@@ -71,21 +71,25 @@ test("worker starts the built artifact independently and web retains its web com
   assert.deepEqual(workerSettings.get("ExecStart"), ["/usr/local/bin/node /opt/pdf-checker/current/dist/audit-worker.mjs"]);
   assert.deepEqual(workerSettings.get("Restart"), ["on-failure"]);
   assert.deepEqual(workerSettings.get("RestartSec"), ["5"]);
-  assert.deepEqual(workerSettings.get("TimeoutStopSec"), ["30"]);
+  assert.deepEqual(workerSettings.get("TimeoutStopSec"), ["120"]);
   assert.match(worker, /^WantedBy=multi-user\.target$/m);
-  assert.deepEqual(webSettings.get("ExecStart"), ["/usr/local/bin/node scripts/run-vinext.mjs start"]);
+  assert.deepEqual(webSettings.get("ExecStart"), ["/usr/local/bin/node scripts/run-vinext.mjs start --hostname 127.0.0.1"]);
   assert.equal(web.includes("pdf-checker-worker.service"), false, "web must not depend on a successful worker start");
 });
 
 test("nginx and operations documentation preserve upload, installation, and secret-safe procedures", async () => {
-  const [nginx, readme, deploymentDesign] = await Promise.all([
+  const [nginx, readme, deploymentDesign, launcher] = await Promise.all([
     readFile(new URL("../deploy/nginx-pdf-checker.conf", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../docs/superpowers/specs/2026-07-18-github-main-tencent-deployment-design.md", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/run-vinext.mjs", import.meta.url), "utf8"),
   ]);
   const documentation = `${readme}\n${deploymentDesign}`;
 
   assert.match(nginx, /^\s*client_max_body_size\s+25m;$/m);
+  assert.match(nginx, /^\s*proxy_set_header\s+oai-authenticated-user-email\s+"";$/m);
+  assert.match(launcher, /--hostname[\s\S]*127\.0\.0\.1/);
+  assert.doesNotMatch(launcher, /\.\.\.process\.argv\.slice\(3\)/);
   for (const command of [
     "sudo install -d -o ubuntu -g ubuntu -m 0700 /var/lib/pdf-checker",
     "sudo install -d -o ubuntu -g ubuntu -m 0700 /var/lib/pdf-checker/data",
@@ -105,6 +109,9 @@ test("nginx and operations documentation preserve upload, installation, and secr
   }
   assert.match(documentation, /PDF_AUDIT_REQUIRE_AUTH=false/);
   assert.match(documentation, /oai-authenticated-user-email/);
+  assert.match(documentation, /ss -ltnp/);
+  assert.match(documentation, /sqlite3/);
+  assert.match(documentation, /schema|兼容/i);
   assert.match(documentation, /journalctl[^\n]*-n 100[^\n]*--no-pager/);
   assert.doesNotMatch(documentation, /^\s*(?:sudo\s+)?cat\s+\/etc\/pdf-checker\.env\s*$/m);
   assert.match(documentation, /sqlite3[^\n]*\.backup|systemctl stop[^\n]*pdf-checker/);

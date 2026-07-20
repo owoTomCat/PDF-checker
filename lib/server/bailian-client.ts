@@ -151,6 +151,7 @@ export class BailianClientError extends Error {
       | "CONFIG_ERROR"
       | "UPSTREAM_ERROR"
       | "UPSTREAM_TIMEOUT"
+      | "ABORTED"
       | "INVALID_MODEL_OUTPUT",
     message: string,
     public readonly retryable = false,
@@ -415,13 +416,25 @@ export function createBailianClient(options: BailianClientOptions) {
     request: BailianChatRequest,
     schema: z.ZodType<T>,
     correctionDetail?: string,
+    externalSignal?: AbortSignal,
   ): Promise<T> {
     let activeRequest = request;
     let finalError: BailianClientError | null = null;
 
     for (let attempt = 0; attempt < MAX_MODEL_ATTEMPTS; attempt += 1) {
+      if (externalSignal?.aborted) {
+        throw new BailianClientError("ABORTED", "模型请求已停止。");
+      }
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      let timedOut = false;
+      const abortForExternalSignal = () => controller.abort(externalSignal?.reason);
+      if (externalSignal) {
+        externalSignal.addEventListener("abort", abortForExternalSignal, { once: true });
+      }
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
       try {
         const response = await fetchImpl(`${baseUrl}/chat/completions`, {
           method: "POST",
@@ -454,10 +467,13 @@ export function createBailianClient(options: BailianClientOptions) {
         }
         return parseModelContent(rawEnvelope, schema);
       } catch (error) {
+        if (externalSignal?.aborted) {
+          throw new BailianClientError("ABORTED", "模型请求已停止。");
+        }
         const normalizedError =
           error instanceof BailianClientError
             ? error
-            : controller.signal.aborted
+            : controller.signal.aborted && timedOut
               ? new BailianClientError(
                   "UPSTREAM_TIMEOUT",
                   "模型处理超时，请稍后重试。",
@@ -481,6 +497,7 @@ export function createBailianClient(options: BailianClientOptions) {
         throw normalizedError;
       } finally {
         clearTimeout(timeout);
+        externalSignal?.removeEventListener("abort", abortForExternalSignal);
       }
     }
 
@@ -494,7 +511,7 @@ export function createBailianClient(options: BailianClientOptions) {
   }
 
   return {
-    locateRegions(input: LayoutModelInput): Promise<LayoutBatch> {
+    locateRegions(input: LayoutModelInput, signal?: AbortSignal): Promise<LayoutBatch> {
       const parsedInput = LayoutModelInputSchema.parse(input);
       const expectedPageNumbers = parsedInput.pages.map(
         (page) => page.pageNumber,
@@ -503,19 +520,20 @@ export function createBailianClient(options: BailianClientOptions) {
         buildLayoutRequest(parsedInput),
         layoutBatchSchemaForPages(expectedPageNumbers),
         `\u9875\u9762\u5b9a\u4f4d\u7ed3\u679c\u5fc5\u987b\u5305\u542b\u9875\u7801 ${JSON.stringify(expectedPageNumbers)}\uff0c\u6bcf\u9875\u6070\u597d\u8fd4\u56de\u4e00\u6b21\uff1b\u5373\u4f7f\u67d0\u9875\u6ca1\u6709\u76ee\u6807\u533a\u57df\uff0c\u4e5f\u5fc5\u987b\u8fd4\u56de\u8be5\u9875\u5e76\u5c06 regions \u8bbe\u7f6e\u4e3a\u7a7a\u6570\u7ec4\u3002`,
+        signal,
       );
     },
-    recognizeEvidence(input: EvidenceModelInput): Promise<EvidenceBatch> {
-      return complete(buildEvidenceRequest(input), EvidenceBatchSchema);
+    recognizeEvidence(input: EvidenceModelInput, signal?: AbortSignal): Promise<EvidenceBatch> {
+      return complete(buildEvidenceRequest(input), EvidenceBatchSchema, undefined, signal);
     },
-    reviewUrls(input: UrlReviewModelInput): Promise<UrlReviewBatch> {
-      return complete(buildUrlReviewRequest(input), UrlReviewBatchSchema);
+    reviewUrls(input: UrlReviewModelInput, signal?: AbortSignal): Promise<UrlReviewBatch> {
+      return complete(buildUrlReviewRequest(input), UrlReviewBatchSchema, undefined, signal);
     },
-    extractTable(input: TableModelInput): Promise<TableBatch> {
-      return complete(buildTableRequest(input), TableBatchSchema);
+    extractTable(input: TableModelInput, signal?: AbortSignal): Promise<TableBatch> {
+      return complete(buildTableRequest(input), TableBatchSchema, undefined, signal);
     },
-    associateRows(input: AssociationModelInput): Promise<AssociationBatch> {
-      return complete(buildAssociationRequest(input), AssociationBatchSchema);
+    associateRows(input: AssociationModelInput, signal?: AbortSignal): Promise<AssociationBatch> {
+      return complete(buildAssociationRequest(input), AssociationBatchSchema, undefined, signal);
     },
   };
 }

@@ -11,10 +11,10 @@ WorkingDirectory=/opt/pdf-checker/current
 Environment=NODE_ENV=production
 Environment=PORT=3000
 EnvironmentFile=/etc/pdf-checker.env
-ExecStart=/usr/local/bin/node scripts/run-vinext.mjs start
+ExecStart=/usr/local/bin/node scripts/run-vinext.mjs start --hostname 127.0.0.1
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+TimeoutStopSec=120
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

@@ -50,6 +50,7 @@ function makeTestWorker(options: {
   processTask?: (
     task: TestTask,
     onProgress: (progress: PipelineProgress) => void | Promise<void>,
+    signal: AbortSignal | undefined,
   ) => Promise<typeof finalResult>;
   updateProgress?: (input: { status: string }) => Promise<void> | void;
   cleanup?: () => Promise<void>;
@@ -74,6 +75,7 @@ function makeTestWorker(options: {
   const progressStages: string[] = [];
   const completedTaskIds: string[] = [];
   const failures: Array<{ id: string; errorCode: string }> = [];
+  const requeuedTaskIds: string[] = [];
   const destroyedTaskIds: string[] = [];
   let claimIndex = 0;
   let recoveryCount = 0;
@@ -99,6 +101,10 @@ function makeTestWorker(options: {
     async fail(input: { id: string; errorCode: string }) {
       failures.push({ id: input.id, errorCode: input.errorCode });
       await options.failTask?.(input);
+    },
+    requeueClaimAfterShutdown(id: string) {
+      requeuedTaskIds.push(id);
+      return true;
     },
     findExpiredPdfTasks() {
       return [];
@@ -150,7 +156,7 @@ function makeTestWorker(options: {
     gateway: {} as never,
     runPipeline: async (input) => {
       const task = tasks.find((candidate) => candidate.fileName === input.fileName)!;
-      if (options.processTask) return options.processTask(task, input.onProgress!);
+      if (options.processTask) return options.processTask(task, input.onProgress!, input.signal);
       for (const [index, stage] of stages.entries()) {
         await input.onProgress?.({
           stage,
@@ -172,6 +178,7 @@ function makeTestWorker(options: {
     progressStages,
     completedTaskIds,
     failures,
+    requeuedTaskIds,
     destroyedTaskIds,
     get claimCount() {
       return claimIndex;
@@ -359,6 +366,47 @@ test("abort prevents new claims and stop waits for the current task", async () =
   assert.equal(harness.claimCount, 1);
 });
 
+test("cooperative stop forwards its signal, requeues the active claim, and does not fail it", async () => {
+  const controller = new AbortController();
+  let pipelineSignal: AbortSignal | undefined;
+  const harness = makeTestWorker({
+    concurrency: 1,
+    queuedTaskCount: 1,
+    async processTask(_task, _onProgress, signal) {
+      pipelineSignal = signal;
+      if (!signal) throw new Error("worker did not forward its shutdown signal");
+      await new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      return finalResult;
+    },
+  });
+  const running = harness.worker.start(controller.signal);
+  await waitFor(() => pipelineSignal !== undefined);
+  controller.abort("SIGTERM");
+  await harness.worker.stop();
+  await running;
+  assert.equal(pipelineSignal?.aborted, true);
+  assert.deepEqual(harness.requeuedTaskIds, ["task-1"]);
+  assert.deepEqual(harness.failures, []);
+});
+
+test("a shutdown arriving after pipeline output requeues before completion", async () => {
+  const controller = new AbortController();
+  const harness = makeTestWorker({
+    concurrency: 1,
+    queuedTaskCount: 1,
+    async processTask() {
+      controller.abort("SIGTERM");
+      return finalResult;
+    },
+  });
+  await harness.worker.start(controller.signal);
+  assert.deepEqual(harness.requeuedTaskIds, ["task-1"]);
+  assert.deepEqual(harness.completedTaskIds, []);
+  assert.deepEqual(harness.failures, []);
+});
+
 test("fatal polling waits for an in-progress periodic cleanup before start and stop settle", async () => {
   let releaseFirstTask!: () => void;
   let releasePeriodicCleanup!: () => void;
@@ -544,6 +592,7 @@ test("worker rejects a private-upload symlink that resolves outside storage", as
       fail(input) {
         failures.push({ id: input.id, errorCode: input.errorCode });
       },
+      requeueClaimAfterShutdown() { return true; },
       findExpiredPdfTasks() { return []; },
       markPdfDeleted() { return false; },
       claimOrphanPdfDeletion() { return false; },
@@ -596,6 +645,7 @@ test("default PDF reader passes exact bytes to the opener and closes its handle"
       updateProgress() {},
       complete() {},
       fail() {},
+      requeueClaimAfterShutdown() { return true; },
       findExpiredPdfTasks() { return []; },
       markPdfDeleted() { return false; },
       claimOrphanPdfDeletion() { return false; },

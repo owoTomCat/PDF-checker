@@ -69,7 +69,7 @@ export function createBailianAuditGateway(
   }
 
   return {
-    async locate(rawMetadata, images) {
+    async locate(rawMetadata, images, signal) {
       const metadata = LayoutRequestMetadataSchema.parse(rawMetadata);
       const uniquePages = new Set(metadata.pageNumbers);
       if (
@@ -88,7 +88,7 @@ export function createBailianAuditGateway(
           pageNumber: metadata.pageNumbers[index],
           dataUrl,
         })),
-      });
+      }, signal);
       const expectedPages = [...metadata.pageNumbers].sort((a, b) => a - b);
       const returnedPages = output.pages
         .map((page) => page.pageNumber)
@@ -107,7 +107,7 @@ export function createBailianAuditGateway(
       });
     },
 
-    async recognize(rawMetadata, images) {
+    async recognize(rawMetadata, images, signal) {
       const metadata = EvidenceRequestMetadataSchema.parse(rawMetadata);
       const regionIds = new Set(metadata.regions.map((region) => region.regionId));
       const invalidMetadata =
@@ -138,7 +138,7 @@ export function createBailianAuditGateway(
           ...region,
           dataUrl: dataUrls[index],
         })),
-      });
+      }, signal);
       const normalizedOutput = {
         ...output,
         screenshots: output.screenshots.map((item) => ({
@@ -191,7 +191,7 @@ export function createBailianAuditGateway(
       });
     },
 
-    async reviewUrls(rawMetadata, images) {
+    async reviewUrls(rawMetadata, images, signal) {
       const metadata = UrlReviewRequestMetadataSchema.parse(rawMetadata);
       const screenshotIds = new Set(
         metadata.pairs.map((pair) => pair.screenshotId),
@@ -213,7 +213,7 @@ export function createBailianAuditGateway(
           colorDataUrl: dataUrls[index * 2],
           grayscaleDataUrl: dataUrls[index * 2 + 1],
         })),
-      });
+      }, signal);
       const expectedIds = new Set(metadata.pairs.map((pair) => pair.screenshotId));
       const returnedIds = new Set(
         output.reviews.map((review) => review.screenshotId),
@@ -230,7 +230,7 @@ export function createBailianAuditGateway(
       });
     },
 
-    async extractTable(rawMetadata, images) {
+    async extractTable(rawMetadata, images, signal) {
       const metadata = TableRequestMetadataSchema.parse(rawMetadata);
       const regionIds = new Set(metadata.regions.map((region) => region.regionId));
       if (
@@ -249,7 +249,7 @@ export function createBailianAuditGateway(
           ...region,
           dataUrl: dataUrls[index],
         })),
-      });
+      }, signal);
       const unexpectedRegion = [...output.headers, ...output.rows].some(
         (item) => !regionIds.has(item.regionId),
       );
@@ -265,10 +265,10 @@ export function createBailianAuditGateway(
       });
     },
 
-    async associate(rawInput) {
+    async associate(rawInput, signal) {
       const input = AssociationRequestSchema.parse(rawInput);
       const client = resolveClient();
-      const output = await client.associateRows(input);
+      const output = await client.associateRows(input, signal);
       const expectedScreenshotIds = new Set(
         input.screenshots.map((item) => item.id),
       );
@@ -337,7 +337,8 @@ export function createBailianAuditGateway(
       });
     },
 
-    async finalize(rawInput) {
+    async finalize(rawInput, signal) {
+      if (signal?.aborted) throw signal.reason;
       const input = StrictFinalizeRequestSchema.parse(rawInput);
       return StrictFinalAuditResponseSchema.parse(buildFinalAuditResult(input));
     },

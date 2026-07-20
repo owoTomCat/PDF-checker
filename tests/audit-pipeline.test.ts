@@ -80,6 +80,7 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
   let firstProgressPending = true;
   let destroyed = false;
   let finalBody: StrictFinalizeRequest | undefined;
+  const controller = new AbortController();
   const document: RenderedPdfDocument = {
     pageCount: 1,
     async renderPage(pageNumber) {
@@ -105,13 +106,15 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
     },
   };
   const gateway: AuditStageGateway = {
-    async locate(metadata, images) {
+    async locate(metadata, images, signal) {
+      assert.equal(signal, controller.signal);
       calls.push("locate");
       assert.deepEqual(metadata.pageNumbers, [1]);
       assert.equal(images.length, 1);
       return { model: "qwen3.7-plus", ...strictLayout, warnings: ["layout-warning"] };
     },
-    async recognize(metadata, images) {
+    async recognize(metadata, images, signal) {
+      assert.equal(signal, controller.signal);
       calls.push("recognize");
       assert.equal(metadata.regions.length, 2);
       assert.equal(images.length, 2);
@@ -121,7 +124,8 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
         warnings: ["evidence-warning"],
       };
     },
-    async reviewUrls(metadata, images) {
+    async reviewUrls(metadata, images, signal) {
+      assert.equal(signal, controller.signal);
       calls.push("reviewUrls");
       assert.equal(metadata.pairs.length, 1);
       assert.equal(images.length, 2);
@@ -131,13 +135,15 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
         warnings: ["url-warning"],
       };
     },
-    async extractTable(metadata, images) {
+    async extractTable(metadata, images, signal) {
+      assert.equal(signal, controller.signal);
       calls.push("extractTable");
       assert.equal(metadata.regions.length, 1);
       assert.equal(images.length, 1);
       return { model: "qwen3.7-plus", ...strictTable, warnings: ["table-warning"] };
     },
-    async associate(input) {
+    async associate(input, signal) {
+      assert.equal(signal, controller.signal);
       calls.push("associate");
       assert.deepEqual(Object.keys(input.screenshots[0]).sort(), [
         "id",
@@ -148,7 +154,8 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
       ]);
       return { model: "qwen3.7-plus", ...strictAssociation };
     },
-    async finalize(input) {
+    async finalize(input, signal) {
+      assert.equal(signal, controller.signal);
       calls.push("finalize");
       finalBody = input;
       return buildFinalAuditResult(input);
@@ -161,6 +168,7 @@ test("orchestrates isolated stages in strict order and aggregates warnings", asy
     fileType: "application/pdf",
     pdf: document,
     gateway,
+    signal: controller.signal,
     async onProgress(progress) {
       progressStages.add(progress.stage);
       if (firstProgressPending) {

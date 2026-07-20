@@ -364,6 +364,19 @@ export class TaskRepository {
     return mapTaskDetail(row);
   }
 
+  requeueClaimAfterShutdown(id: string, now: string): boolean {
+    const activeStatuses = ACTIVE_STATUSES.map(() => "?").join(", ");
+    const result = this.db.prepare(`
+      UPDATE audit_tasks
+      SET status = 'queued', progress = 0, processed_pages = 0, total_pages = NULL,
+          error_code = NULL, error_message = NULL, completed_at = NULL,
+          attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END,
+          updated_at = ?
+      WHERE id = ? AND status IN (${activeStatuses})
+    `).run(now, id, ...ACTIVE_STATUSES);
+    return changedRows(result);
+  }
+
   recoverInterrupted(now: string): void {
     const activeStatuses = ACTIVE_STATUSES.map(() => "?").join(", ");
     this.db.exec("BEGIN IMMEDIATE");

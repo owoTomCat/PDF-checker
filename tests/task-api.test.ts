@@ -11,6 +11,7 @@ import { runtime as batchDeleteRouteRuntime } from "../app/api/tasks/batch-delet
 import { runtime as importRouteRuntime } from "../app/api/tasks/import/route";
 import {
   createTaskApiForDataDir,
+  parsePdfRetentionHours,
   taskOwnerFromRequest,
 } from "../lib/server/task-api";
 import { cleanupTaskFiles, defaultTaskFileOperations } from "../lib/server/task-files";
@@ -84,6 +85,35 @@ test("upload becomes durable before returning 202", async (t) => {
   assert.equal(task?.id, id);
   assert.equal(task?.status, "queued");
   assert.equal(task?.pdfAvailable, true);
+});
+
+test("PDF retention hours defaults to 72 and rejects unsafe deployment values", () => {
+  assert.equal(parsePdfRetentionHours(undefined), 72);
+  assert.equal(parsePdfRetentionHours("24"), 24);
+  for (const value of ["0", "-1", "1.5", "many", "8761"]) {
+    assert.throws(() => parsePdfRetentionHours(value), /PDF_AUDIT_PDF_RETENTION_HOURS/);
+  }
+});
+
+test("task API applies the configured PDF retention duration at upload time", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-retention-"));
+  const api = createTaskApiForDataDir(root, {
+    requireAuth: true,
+    env: { PDF_AUDIT_PDF_RETENTION_HOURS: "24" } as unknown as NodeJS.ProcessEnv,
+  });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const id = await createUploadedTask(api);
+  const task = api.repository.getOwned("owner@example.com", id);
+  assert.equal(
+    Date.parse(task!.pdfExpiresAt!) - Date.parse(task!.createdAt),
+    24 * 60 * 60 * 1_000,
+  );
+  assert.throws(
+    () => createTaskApiForDataDir(root, { requireAuth: true, env: { PDF_AUDIT_PDF_RETENTION_HOURS: "0" } as unknown as NodeJS.ProcessEnv }),
+    /PDF_AUDIT_PDF_RETENTION_HOURS/,
+  );
 });
 
 test("rejects an overlong public filename before creating file artifacts", async (t) => {

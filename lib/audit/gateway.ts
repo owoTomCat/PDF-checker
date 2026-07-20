@@ -41,21 +41,29 @@ export interface AuditStageGateway {
   locate(
     metadata: z.infer<typeof LayoutRequestMetadataSchema>,
     images: RenderedImage[],
+    signal?: AbortSignal,
   ): Promise<z.infer<typeof LayoutApiResponseSchema>>;
   recognize(
     metadata: z.infer<typeof EvidenceRequestMetadataSchema>,
     images: RenderedImage[],
+    signal?: AbortSignal,
   ): Promise<z.infer<typeof EvidenceApiResponseSchema>>;
   reviewUrls(
     metadata: z.infer<typeof UrlReviewRequestMetadataSchema>,
     images: RenderedImage[],
+    signal?: AbortSignal,
   ): Promise<z.infer<typeof UrlReviewApiResponseSchema>>;
   extractTable(
     metadata: z.infer<typeof TableRequestMetadataSchema>,
     images: RenderedImage[],
+    signal?: AbortSignal,
   ): Promise<z.infer<typeof TableApiResponseSchema>>;
   associate(
     input: z.infer<typeof AssociationRequestSchema>,
+    signal?: AbortSignal,
   ): Promise<z.infer<typeof AssociationApiResponseSchema>>;
-  finalize(input: StrictFinalizeRequest): Promise<StrictFinalAuditResponse>;
+  finalize(
+    input: StrictFinalizeRequest,
+    signal?: AbortSignal,
+  ): Promise<StrictFinalAuditResponse>;
 }

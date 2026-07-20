@@ -109,6 +109,12 @@ async function emitProgress(
   await callback?.(progress);
 }
 
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  }
+}
+
 function uniqueWarnings(warnings: string[]) {
   return [...new Set(warnings.filter(Boolean))];
 }
@@ -142,10 +148,13 @@ export async function runAuditPipeline(options: {
   pdf: RenderedPdfDocument;
   gateway: AuditStageGateway;
   onProgress?: (progress: PipelineProgress) => void | Promise<void>;
+  signal?: AbortSignal;
 }): Promise<StrictFinalAuditResponse> {
   const { gateway, pdf } = options;
+  const { signal } = options;
 
   try {
+    throwIfAborted(signal);
     validatePdfFile({
       name: options.fileName,
       size: options.fileSize,
@@ -167,6 +176,7 @@ export async function runAuditPipeline(options: {
         images: RenderedImage[];
       }>;
       for (const pageNumber of pageBatches[batchIndex]) {
+        throwIfAborted(signal);
         await emitProgress(options.onProgress, {
           stage: "rendering",
           progress: Math.round(2 + (renderedPageCount / pdf.pageCount) * 13),
@@ -185,9 +195,11 @@ export async function runAuditPipeline(options: {
           ],
         });
         renderedPageCount += 1;
+        throwIfAborted(signal);
       }
 
       for (const imageBatch of splitRenderedByBytes(rendered, MAX_BATCH_PAGES)) {
+        throwIfAborted(signal);
         const pageNumbers = imageBatch.map((item) => item.pageNumber);
         await emitProgress(options.onProgress, {
           stage: "locating",
@@ -200,7 +212,9 @@ export async function runAuditPipeline(options: {
         const output = await gateway.locate(
           { fileName: options.fileName, totalPages: pdf.pageCount, pageNumbers },
           imageBatch.flatMap((item) => item.images),
+          signal,
         );
+        throwIfAborted(signal);
         const returnedPages = new Set(output.pages.map((page) => page.pageNumber));
         if (
           returnedPages.size !== pageNumbers.length ||
@@ -272,6 +286,7 @@ export async function runAuditPipeline(options: {
     for (let batchIndex = 0; batchIndex < evidenceBatches.length; batchIndex += 1) {
       const rendered: Array<{ region: LayoutRegion; images: RenderedImage[] }> = [];
       for (const region of evidenceBatches[batchIndex]) {
+        throwIfAborted(signal);
         rendered.push({
           region,
           images: [
@@ -285,8 +300,10 @@ export async function runAuditPipeline(options: {
             },
           ],
         });
+        throwIfAborted(signal);
       }
       for (const imageBatch of splitRenderedByBytes(rendered, MAX_BATCH_PAGES)) {
+        throwIfAborted(signal);
         const regions = imageBatch.map(({ region }) => ({
           regionId: region.regionId,
           type: region.type as "certificate" | "rights_screenshot",
@@ -310,7 +327,9 @@ export async function runAuditPipeline(options: {
         const output = await gateway.recognize(
           { fileName: options.fileName, totalPages: pdf.pageCount, regions },
           imageBatch.flatMap((item) => item.images),
+          signal,
         );
+        throwIfAborted(signal);
         evidenceCertificates.push(...output.certificates);
         evidenceScreenshots.push(...output.screenshots);
         evidenceWarnings.push(...output.warnings);
@@ -362,6 +381,7 @@ export async function runAuditPipeline(options: {
         images: RenderedImage[];
       }> = [];
       for (const { screenshot, addressBar } of urlBatches[batchIndex]) {
+        throwIfAborted(signal);
         const color = await pdf.renderRegion(
           addressBar.pageNumber,
           addressBar.bounds,
@@ -394,11 +414,13 @@ export async function runAuditPipeline(options: {
             },
           ],
         });
+        throwIfAborted(signal);
       }
       for (const imageBatch of splitRenderedByBytes(
         rendered,
         URL_REVIEW_BATCH_PAIRS,
       )) {
+        throwIfAborted(signal);
         const pairs = imageBatch.map(({ screenshot, addressBar }) => ({
           screenshotId: screenshot.screenshotId,
           pageNumber: screenshot.pageNumber,
@@ -415,7 +437,9 @@ export async function runAuditPipeline(options: {
         const output = await gateway.reviewUrls(
           { fileName: options.fileName, totalPages: pdf.pageCount, pairs },
           imageBatch.flatMap((item) => item.images),
+          signal,
         );
+        throwIfAborted(signal);
         urlReviews.push(...output.reviews);
         urlWarnings.push(...output.warnings);
       }
@@ -441,6 +465,7 @@ export async function runAuditPipeline(options: {
     for (let batchIndex = 0; batchIndex < tableBatches.length; batchIndex += 1) {
       const rendered: Array<{ region: LayoutRegion; images: RenderedImage[] }> = [];
       for (const region of tableBatches[batchIndex]) {
+        throwIfAborted(signal);
         rendered.push({
           region,
           images: [
@@ -454,8 +479,10 @@ export async function runAuditPipeline(options: {
             },
           ],
         });
+        throwIfAborted(signal);
       }
       for (const imageBatch of splitRenderedByBytes(rendered, MAX_BATCH_PAGES)) {
+        throwIfAborted(signal);
         const regions = imageBatch.map(({ region }) => ({
           regionId: region.regionId,
           pageNumber: region.pageNumber,
@@ -472,7 +499,9 @@ export async function runAuditPipeline(options: {
         const output = await gateway.extractTable(
           { fileName: options.fileName, totalPages: pdf.pageCount, regions },
           imageBatch.flatMap((item) => item.images),
+          signal,
         );
+        throwIfAborted(signal);
         tableHeaders.push(...output.headers);
         tableRows.push(...output.rows);
         tableWarnings.push(...output.warnings);
@@ -504,10 +533,12 @@ export async function runAuditPipeline(options: {
     let associations: StrictFinalizeRequest["associations"]["associations"] = [];
     const associationWarnings: string[] = [];
     if (screenshotLocators.length > 0) {
+      throwIfAborted(signal);
       const output = await gateway.associate({
         screenshots: screenshotLocators,
         tableRows: tableRowLocators,
-      });
+      }, signal);
+      throwIfAborted(signal);
       associations = output.associations;
       associationWarnings.push(...output.warnings);
     }
@@ -553,7 +584,8 @@ export async function runAuditPipeline(options: {
       batchIndex: 1,
       batchCount: 1,
     });
-    return gateway.finalize(finalInput);
+    throwIfAborted(signal);
+    return gateway.finalize(finalInput, signal);
   } finally {
     await pdf.destroy().catch(() => undefined);
   }

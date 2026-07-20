@@ -38,6 +38,8 @@ npm run build
 
 `npm run build` 必须同时构建 web 和 worker；成功后应存在 `dist/audit-worker.mjs`。Linux 服务器需满足项目声明的 Node 版本，并确保 `@napi-rs/canvas` 的 Linux 原生依赖在 `npm ci` 后可加载。
 
+在线备份和队列计数检查依赖 SQLite CLI；发布前应确认 `command -v sqlite3` 成功。Ubuntu 缺少该命令时先由管理员安装 `sqlite3` 软件包。
+
 ## 腾讯云单机部署
 
 代码目录固定为 `/opt/pdf-checker/current`，私有任务数据固定为 `/var/lib/pdf-checker`。代码发布和版本切换不得触碰私有数据目录。
@@ -83,7 +85,17 @@ sudo systemctl enable --now pdf-checker.service pdf-checker-worker.service
 
 web 服务可以在 worker 故障时继续提供上传、历史和状态查询；worker 服务恢复后会继续领取队列任务。
 
+web systemd unit 以 `--hostname 127.0.0.1` 启动，因此应用端口只绑定 loopback，由 Nginx 对外提供访问。验收时必须确认没有将 Node 3000 端口暴露到公网：
+
+```bash
+sudo ss -ltnp | grep ':3000'
+```
+
+输出应只显示 `127.0.0.1:3000`（如启用 IPv6 loopback，也只能是 `::1:3000`）。
+
 Nginx 使用 `deploy/nginx-pdf-checker.conf`，并保留 `client_max_body_size 25m`，以接受最大 20 MiB 的 PDF 加 multipart 开销。安装或更新 Nginx 配置后执行 `sudo nginx -t`，再重载 Nginx。
+
+当前 Nginx 会显式清空入站 `oai-authenticated-user-email`，所以当前配置不支持认证模式；不能只把 `PDF_AUDIT_REQUIRE_AUTH` 改为 `true`。未来可信认证代理必须先完成认证，拒绝或清除客户端伪造的该头，再以代理控制的不可伪造变量覆盖它，同时保持 3000 端口仅 loopback 可见。
 
 ## 运行检查与安全运维
 
@@ -110,6 +122,8 @@ sudo -u ubuntu sqlite3 /var/lib/pdf-checker/data/pdf-checker.sqlite ".backup '/v
 
 也可在明确的维护窗口先停止两个服务，再复制数据库及其所需数据目录；恢复前先验证备份可由 SQLite 打开。PDF 保留期验证应在上传后超过 72 小时检查：任务结果仍在，终态任务的 `pdf_deleted_at` 已标记且上传文件数减少；不得通过删除排队或活动任务来“验证”清理。
 
+收到 systemd 停止信号时，worker 会停止领取新任务，将已经协作式中止的 active claim 重新入队并撤销这一次 claim 计数；正常情况远小于 `TimeoutStopSec=120`。PDF 原生渲染并非所有阶段都能立刻抢占，因此 120 秒只是在协作清理失效时才由 systemd 发送 SIGKILL 的上限。Ubuntu 验收必须在一个实际长任务期间执行停止操作，并确认任务重新排队且没有消耗三次恢复额度。
+
 发布或回滚时，先停止 worker、再停止 web，切换代码并运行 `npm ci && npm run build`，确认 `dist/audit-worker.mjs` 后先启动 web、再启动 worker：
 
 ```bash
@@ -122,6 +136,8 @@ sudo systemctl restart pdf-checker-worker.service
 ```
 
 回滚不会删除 `/var/lib/pdf-checker`，因此既有任务、结果和仍在 72 小时保留期内的 PDF 会保留。更新后再次执行上述服务状态、bounded journal、HTTP、队列计数、权限和容量检查。
+
+回滚前先检查目标代码的 SQLite schema 和 worker 任务状态与当前数据是否兼容。若不兼容，保持两个服务停止，从已验证的 SQLite 备份及其必要私有数据恢复后再启动；不要把新版本数据库直接交给旧 worker。
 
 ## 主要文件
 
