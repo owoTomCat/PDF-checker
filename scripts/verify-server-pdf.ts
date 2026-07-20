@@ -12,9 +12,14 @@ async function main() {
   const document = await openServerPdf(pdfPath);
 
   try {
-    const renderedPages = [];
+    const renderedImageSizes = [];
     for (let page = 1; page <= document.pageCount; page += 1) {
-      renderedPages.push({ page, blob: await document.renderPage(page) });
+      const blob = await document.renderPage(page);
+      renderedImageSizes.push({
+        page,
+        byteSize: blob.size,
+        mimeType: blob.type,
+      });
     }
 
     console.log(
@@ -22,11 +27,7 @@ async function main() {
         fileName: path.basename(pdfPath),
         byteSize: fileStat.size,
         pageCount: document.pageCount,
-        renderedImageSizes: renderedPages.map(({ page, blob }) => ({
-          page,
-          byteSize: blob.size,
-          mimeType: blob.type,
-        })),
+        renderedImageSizes,
       }),
     );
   } finally {
