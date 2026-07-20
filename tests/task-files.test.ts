@@ -116,6 +116,21 @@ test("cleanup removes expired terminal and stale unreferenced files without dele
   assert.doesNotMatch(JSON.stringify(result), /\.pdf|uploading|[A-Fa-f0-9]{8}-/);
 });
 
+test("cleanup preserves a stale expired PDF while its task is rendering", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-rendering-cleanup-"));
+  const db = openTaskDatabase(root);
+  const repository = new TaskRepository(db);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const pdfPath = await persistPdf({ dataDir: root, taskId: activeId, bytes: new TextEncoder().encode("%PDF-active") });
+  await utimes(pdfPath, new Date("2026-07-19T22:00:00.000Z"), new Date("2026-07-19T22:00:00.000Z"));
+  repository.create({ id: activeId, ownerEmail: "a@example.com", fileName: "active.pdf", fileSize: 10, fileType: "application/pdf", pdfPath, pdfExpiresAt: expiredAt, now: "2026-07-16T00:00:00.000Z" });
+  assert.equal(repository.claimNext("2026-07-16T00:01:00.000Z")?.status, "rendering");
+  await cleanupTaskFiles({ repository, dataDir: root, now: cleanupNow });
+  await access(pdfPath);
+  assert.equal(repository.getOwned("a@example.com", activeId)?.status, "rendering");
+});
+
 test("refuses to delete a PDF candidate outside the private upload directory", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-safe-delete-"));
   t.after(() => rm(root, { recursive: true, force: true }));

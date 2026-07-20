@@ -13,7 +13,7 @@ import {
   createTaskApiForDataDir,
   taskOwnerFromRequest,
 } from "../lib/server/task-api";
-import { defaultTaskFileOperations } from "../lib/server/task-files";
+import { cleanupTaskFiles, defaultTaskFileOperations } from "../lib/server/task-files";
 import { strictFinalizeRequest } from "./strict-fixtures";
 
 function authenticatedRequest(url: string, init: RequestInit = {}) {
@@ -233,6 +233,23 @@ test("legacy import is terminal-only, owner-bound, idempotent, and limited to 80
   assert.equal(overflow.status, 422);
 });
 
+test("legacy source IDs are isolated by owner and idempotent per owner", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-import-owners-"));
+  const api = createTaskApiForDataDir(root, { requireAuth: true });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const body = JSON.stringify({ tasks: [terminalLegacyTask("shared-source")] });
+  const requestFor = (email: string) => authenticatedRequest("https://pdf.example/api/tasks/import", { method: "POST", headers: { "content-type": "application/json", "oai-authenticated-user-email": email }, body });
+  assert.equal((await api.importLegacy(requestFor("one@example.com"))).status, 200);
+  assert.equal((await api.importLegacy(requestFor("two@example.com"))).status, 200);
+  assert.equal((await (await api.importLegacy(requestFor("one@example.com"))).json() as { imported: number }).imported, 0);
+  const one = api.repository.list("one@example.com", { limit: 80 }).items;
+  const two = api.repository.list("two@example.com", { limit: 80 }).items;
+  assert.equal(one.length, 1);
+  assert.equal(two.length, 1);
+  assert.notEqual(one[0].id, two[0].id);
+});
+
 test("auth-disabled production uses only its configured single-tenant owner", () => {
   const request = new Request("https://pdf.example/api/tasks", {
     headers: {
@@ -259,7 +276,7 @@ test("task route modules use the Node runtime", () => {
   );
 });
 
-test("failed deletion keeps its task row and failed upload rollback returns a safe error", async (t) => {
+test("pending deletion survives unlink failure and cleanup retries it", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-delete-retry-"));
   const taskId = "fce916b4-7297-4f7f-aac5-2e6e84de2032";
   const deleteId = "ace916b4-7297-4f7f-aac5-2e6e84de2032";
@@ -293,9 +310,16 @@ test("failed deletion keeps its task row and failed upload rollback returns a sa
   const removal = await api.remove(authenticatedRequest(`https://pdf.example/api/tasks/${createdDeleteId}`, { method: "DELETE" }), createdDeleteId);
   assert.equal(removal.status, 204);
   assert.equal(api.repository.getOwned("owner@example.com", createdDeleteId), null);
+  const pendingPath = path.join(root, "uploads", `${createdDeleteId}.pdf`);
+  await access(pendingPath);
+  assert.deepEqual(api.repository.findPendingPdfDeletions(), [pendingPath]);
+  const cleanup = await cleanupTaskFiles({ repository: api.repository, dataDir: root, now: new Date().toISOString() });
+  await assert.rejects(access(pendingPath));
+  assert.deepEqual(api.repository.findPendingPdfDeletions(), []);
+  assert.equal(cleanup.deletedPendingPdfs, 1);
 });
 
-test("deletion reservation prevents a concurrent retry from losing its PDF", async (t) => {
+test("pending deletion prevents a concurrent retry from losing its PDF", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-delete-race-"));
   const retryId = "bce916b4-7297-4f7f-aac5-2e6e84de2032";
   const api = createTaskApiForDataDir(root, {
