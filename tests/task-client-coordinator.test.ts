@@ -4,7 +4,8 @@ import {
   SharedUploadQueue,
   TaskViewState,
   TaskPollingController,
-  mergeTaskByFreshness,
+  detailFromTaskSummary,
+  isActiveTask,
   removeCheckedTaskId,
   runReleasingUploadQueue,
   type PollingEnvironment,
@@ -68,13 +69,36 @@ test("upload queue caps requests at three and releases each item as it settles",
   assert.deepEqual(released.slice().sort(), [0, 1, 2, 3, 4]);
 });
 
-test("freshness merge prevents older polling responses from reverting task state", () => {
-  const current = task("one", "2026-07-20T00:02:00.000Z", 100);
-  const stale = task("one", "2026-07-20T00:01:00.000Z", 40);
-  assert.equal(mergeTaskByFreshness(current, stale), current);
+test("summary conversion preserves a report only for the identical terminal snapshot", () => {
+  const previous = {
+    ...task("one", "2026-07-20T00:03:00.000Z", 100),
+    reportText: "trusted report",
+  };
+  const { reportText: _reportText, report: _report, ...sameSummary } = previous;
+  void _reportText;
+  void _report;
   assert.equal(
-    mergeTaskByFreshness(current, task("one", "2026-07-20T00:03:00.000Z", 100)).updatedAt,
-    "2026-07-20T00:03:00.000Z",
+    detailFromTaskSummary(sameSummary, previous).reportText,
+    "trusted report",
+  );
+  assert.equal(
+    detailFromTaskSummary(
+      { ...sameSummary, updatedAt: "2026-07-20T00:04:00.000Z" },
+      previous,
+    ).reportText,
+    null,
+  );
+  assert.equal(
+    detailFromTaskSummary(
+      { ...sameSummary, status: "failed", outcome: "failed" },
+      previous,
+    ).reportText,
+    null,
+  );
+  assert.equal(
+    detailFromTaskSummary({ ...sameSummary, id: "other-task" }, previous)
+      .reportText,
+    null,
   );
 });
 
@@ -213,6 +237,102 @@ test("an async read started before retry cannot overwrite queued state with the 
   assert.equal(isActive(state.visibleTasks()[0]), true);
 });
 
+test("a newer read is authoritative when equal-timestamp responses arrive in reverse order", () => {
+  const state = new TaskViewState();
+  const failed = {
+    ...task("one", "2026-07-20T00:03:00.000Z", 100),
+    status: "failed" as const,
+    outcome: "failed" as const,
+  };
+  state.completeList([failed], state.beginList({ limit: 80 }));
+  const olderRead = state.beginRead("one");
+  const newerRead = state.beginRead("one");
+  const queued = {
+    ...failed,
+    status: "queued" as const,
+    outcome: null,
+    progress: 0,
+    completedAt: null,
+  };
+
+  assert.equal(state.applyRead(queued, newerRead), true);
+  assert.equal(state.applyRead(failed, olderRead), false);
+  assert.equal(state.visibleTasks()[0]?.status, "queued");
+  assert.equal(state.visibleTasks()[0]?.progress, 0);
+});
+
+test("an old list cannot overwrite a newer detail or polling snapshot", () => {
+  const state = new TaskViewState();
+  const failed = {
+    ...task("one", "2026-07-20T00:03:00.000Z", 100),
+    status: "failed" as const,
+    outcome: "failed" as const,
+  };
+  state.completeList([failed], state.beginList({ limit: 80 }));
+  const olderList = state.beginList({ limit: 80 });
+  const newerRead = state.beginRead("one");
+  const queued = {
+    ...failed,
+    status: "queued" as const,
+    outcome: null,
+    progress: 0,
+    completedAt: null,
+  };
+
+  state.applyRead(queued, newerRead);
+  state.completeList([failed], olderList);
+  assert.equal(state.visibleTasks()[0]?.status, "queued");
+  assert.equal(state.visibleTasks()[0]?.progress, 0);
+});
+
+test("a newer same-filter list remains authoritative when the older list arrives late", () => {
+  const state = new TaskViewState();
+  const olderList = state.beginList({ query: "one", limit: 80 });
+  const newerList = state.beginList({ query: "one", limit: 80 });
+  const failed = {
+    ...task("one", "2026-07-20T00:03:00.000Z", 100),
+    status: "failed" as const,
+    outcome: "failed" as const,
+  };
+  const queued = {
+    ...failed,
+    status: "queued" as const,
+    outcome: null,
+    progress: 0,
+    completedAt: null,
+  };
+
+  state.completeList([queued], newerList);
+  state.completeList([failed], olderList);
+  assert.equal(state.visibleTasks()[0]?.status, "queued");
+});
+
+test("an action response invalidates reads that started while the action was pending", () => {
+  const state = new TaskViewState();
+  const failed = {
+    ...task("one", "2026-07-20T00:03:00.000Z", 100),
+    status: "failed" as const,
+    outcome: "failed" as const,
+  };
+  state.completeList([failed], state.beginList({ limit: 80 }));
+  const retry = state.beginAction("one");
+  const readDuringRetry = state.beginRead("one");
+  state.applyAction(
+    {
+      ...failed,
+      status: "queued",
+      outcome: null,
+      progress: 0,
+      completedAt: null,
+    },
+    retry,
+    false,
+  );
+
+  assert.equal(state.applyRead(failed, readDuringRetry), false);
+  assert.equal(state.visibleTasks()[0]?.status, "queued");
+});
+
 test("stale list rows and deleted tombstones cannot resurrect pre-action state", () => {
   const state = new TaskViewState();
   const failed = { ...task("one", "2026-07-20T00:03:00.000Z", 100), status: "failed" as const, outcome: "failed" as const };
@@ -279,6 +399,129 @@ test("server-filtered view keeps nonmatching local actions hidden and ignores su
   const hiddenRead = state.beginRead("alpha");
   state.applyRead(alpha, hiddenRead);
   assert.deepEqual(state.visibleTasks().map((value) => value.id), ["beta"]);
+});
+
+test("a matching upload keeps an eighty-row view bounded and evicts the oldest active task", () => {
+  const state = new TaskViewState();
+  const initial = Array.from({ length: 80 }, (_, index) => ({
+    ...task(
+      `task-${index.toString().padStart(2, "0")}`,
+      new Date(Date.UTC(2026, 6, 20, 0, index)).toISOString(),
+      40,
+    ),
+    createdAt: new Date(Date.UTC(2026, 6, 20, 0, index)).toISOString(),
+  }));
+  state.completeList(initial, state.beginList({ limit: 80 }));
+  const newest = {
+    ...task("new-upload", "2026-07-20T02:00:00.000Z", 0),
+    status: "queued" as const,
+    createdAt: "2026-07-20T02:00:00.000Z",
+  };
+  const upload = state.beginAction(newest.id);
+  state.applyAction(newest, upload, true);
+
+  const visible = state.visibleTasks();
+  const activeIds = visible.filter(isActiveTask).map((value) => value.id);
+  assert.equal(visible.length, 80);
+  assert.equal(activeIds.length, 80);
+  assert.equal(activeIds.includes("new-upload"), true);
+  assert.equal(activeIds.includes("task-00"), false);
+  assert.ok(state.task("task-00"), "evicted rows may remain in the cache");
+});
+
+test("changing a filter limit bounds the current view before the server responds", () => {
+  const state = new TaskViewState();
+  const rows = Array.from({ length: 5 }, (_, index) => ({
+    ...task(`row-${index}`, `2026-07-20T00:0${index}:00.000Z`, 100),
+    createdAt: `2026-07-20T00:0${index}:00.000Z`,
+  }));
+  state.completeList(rows, state.beginList({ limit: 5 }));
+  state.beginList({ limit: 2 });
+  assert.deepEqual(
+    state.visibleTasks().map((value) => value.id),
+    ["row-4", "row-3"],
+  );
+});
+
+test("a matching upload remains visible when the bounded rows share its creation timestamp", () => {
+  const state = new TaskViewState();
+  const sameCreatedAt = "2026-07-20T00:01:00.000Z";
+  const existing = ["first", "second"].map((id) => ({
+    ...task(id, sameCreatedAt, 100),
+    createdAt: sameCreatedAt,
+  }));
+  state.completeList(existing, state.beginList({ limit: 2 }));
+  const upload = {
+    ...task("new-upload", sameCreatedAt, 0),
+    status: "queued" as const,
+    createdAt: sameCreatedAt,
+  };
+  state.applyAction(upload, state.beginAction(upload.id), true);
+  assert.equal(state.visibleTasks().length, 2);
+  assert.equal(
+    state.visibleTasks().some((value) => value.id === "new-upload"),
+    true,
+  );
+});
+
+test("a matching upload remains visible when an older bounded list completes afterward", () => {
+  const state = new TaskViewState();
+  const sameCreatedAt = "2026-07-20T00:01:00.000Z";
+  const pendingList = state.beginList({ limit: 2 });
+  const upload = {
+    ...task("new-upload", sameCreatedAt, 0),
+    status: "queued" as const,
+    createdAt: sameCreatedAt,
+  };
+  state.applyAction(upload, state.beginAction(upload.id), true);
+  const serverRows = ["first", "second"].map((id) => ({
+    ...task(id, sameCreatedAt, 100),
+    createdAt: sameCreatedAt,
+  }));
+  state.completeList(serverRows, pendingList);
+  assert.equal(state.visibleTasks().length, 2);
+  assert.equal(
+    state.visibleTasks().some((value) => value.id === "new-upload"),
+    true,
+  );
+});
+
+test("local filtering treats percent as the server SQL LIKE multi-character wildcard", () => {
+  const state = new TaskViewState();
+  state.beginList({ query: "report%2026", limit: 80 });
+  const matching = {
+    ...task("percent", "2026-07-20T00:01:00.000Z", 100),
+    fileName: "report-final-2026.pdf",
+  };
+  state.applyAction(matching, state.beginAction(matching.id), true);
+  assert.deepEqual(state.visibleTasks().map((value) => value.id), ["percent"]);
+});
+
+test("local filtering treats underscore as the server SQL LIKE single-character wildcard", () => {
+  const state = new TaskViewState();
+  state.beginList({ query: "report_2026", limit: 80 });
+  const matching = {
+    ...task("underscore", "2026-07-20T00:01:00.000Z", 100),
+    fileName: "reportA2026.pdf",
+  };
+  state.applyAction(matching, state.beginAction(matching.id), true);
+  assert.deepEqual(state.visibleTasks().map((value) => value.id), ["underscore"]);
+});
+
+test("local SQL LIKE filtering treats regex syntax as literal text", () => {
+  const state = new TaskViewState();
+  state.beginList({ query: "[final]", limit: 80 });
+  const literal = {
+    ...task("literal", "2026-07-20T00:01:00.000Z", 100),
+    fileName: "scan[final].pdf",
+  };
+  const notLiteral = {
+    ...task("not-literal", "2026-07-20T00:02:00.000Z", 100),
+    fileName: "scanf.pdf",
+  };
+  state.applyAction(literal, state.beginAction(literal.id), true);
+  state.applyAction(notLiteral, state.beginAction(notLiteral.id), true);
+  assert.deepEqual(state.visibleTasks().map((value) => value.id), ["literal"]);
 });
 
 function isActive(value: AuditTaskDetail | undefined) {

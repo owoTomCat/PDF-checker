@@ -69,6 +69,16 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
     /new SharedUploadQueue<File, AuditTaskSummary>\(MAX_PARALLEL_UPLOADS\)/,
   );
   assert.match(taskHookSource, /viewState\.beginAction\(id\)/);
+  assert.match(
+    taskHookSource,
+    /fetchTask: async \(id, signal\) => \{\s*const token = viewState\.beginRead\(id\);\s*return \{ task: await getTask\(id, undefined, signal\), token \};/,
+  );
+  assert.match(
+    taskHookSource,
+    /const loadTaskDetails = useCallback\([\s\S]*?const token = viewState\.beginRead\(id\);[\s\S]*?void getTask\(id, undefined, controller\.signal\)/,
+  );
+  assert.match(taskHookSource, /tasks\.filter\(isActiveTask\)/);
+  assert.doesNotMatch(taskCoordinatorSource, /mergeTaskByFreshness/);
   assert.match(consoleSource, /event\.currentTarget\.value = ""/);
   assert.match(consoleSource, /removeCheckedTaskId\(current, selectedTask\.id\)/);
   assert.match(consoleSource, /return loadTaskDetails\(selectedTaskId\)/);

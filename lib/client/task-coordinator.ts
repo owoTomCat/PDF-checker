@@ -1,5 +1,5 @@
 import { runWithConcurrency } from "./concurrency";
-import type { AuditTaskDetail } from "../types";
+import type { AuditTaskDetail, AuditTaskSummary } from "../types";
 
 export const ACTIVE_TASK_STATUSES = new Set<AuditTaskDetail["status"]>([
   "queued",
@@ -16,26 +16,29 @@ export function isActiveTask(task: Pick<AuditTaskDetail, "status">) {
   return ACTIVE_TASK_STATUSES.has(task.status);
 }
 
+export function detailFromTaskSummary(
+  summary: AuditTaskSummary,
+  previous?: AuditTaskDetail,
+): AuditTaskDetail {
+  const sameTerminalSnapshot =
+    previous !== undefined &&
+    previous.id === summary.id &&
+    !isActiveTask(previous) &&
+    !isActiveTask(summary) &&
+    previous.status === summary.status &&
+    previous.outcome === summary.outcome &&
+    previous.updatedAt === summary.updatedAt;
+  return {
+    ...summary,
+    reportText: sameTerminalSnapshot ? previous.reportText : null,
+    report: sameTerminalSnapshot ? previous.report : null,
+  };
+}
+
 export function removeCheckedTaskId(ids: ReadonlySet<string>, id: string) {
   const next = new Set(ids);
   next.delete(id);
   return next;
-}
-
-export function mergeTaskByFreshness(
-  current: AuditTaskDetail | undefined,
-  incoming: AuditTaskDetail,
-) {
-  if (!current) return incoming;
-  const currentTime = Date.parse(current.updatedAt);
-  const incomingTime = Date.parse(incoming.updatedAt);
-  if (Number.isFinite(currentTime) && Number.isFinite(incomingTime)) {
-    if (incomingTime < currentTime) return current;
-    if (incomingTime > currentTime) return incoming;
-  }
-  if (!isActiveTask(current) && isActiveTask(incoming)) return current;
-  if (incoming.progress < current.progress) return current;
-  return incoming;
 }
 
 export function runReleasingUploadQueue<T, R>(
@@ -171,21 +174,61 @@ export type VisibleTaskFilters = {
 export type TaskReadToken = {
   id: string;
   generation: number;
+  readSequence: number;
+};
+
+export type TaskActionToken = {
+  id: string;
+  generation: number;
 };
 
 export type TaskListRead = {
   epoch: number;
+  readSequence: number;
   stateVersion: number;
   generations: Map<string, number>;
   filters: VisibleTaskFilters;
 };
 
+const REGEX_SPECIAL_CHARACTERS = new Set([
+  "\\",
+  "^",
+  "$",
+  ".",
+  "*",
+  "+",
+  "?",
+  "(",
+  ")",
+  "[",
+  "]",
+  "{",
+  "}",
+  "|",
+]);
+
+function matchesServerLikeSubstring(value: string, query: string) {
+  let source = "";
+  for (const character of query) {
+    if (character === "%") {
+      if (!source.endsWith(".*")) source += ".*";
+    } else if (character === "_") {
+      source += ".";
+    } else {
+      source += REGEX_SPECIAL_CHARACTERS.has(character)
+        ? `\\${character}`
+        : character;
+    }
+  }
+  return new RegExp(source, "isu").test(value);
+}
+
 function taskMatchesFilters(
   task: Pick<AuditTaskDetail, "fileName" | "createdAt">,
   filters: VisibleTaskFilters,
 ) {
-  const query = filters.query?.trim().toLocaleLowerCase();
-  if (query && !task.fileName.toLocaleLowerCase().includes(query)) return false;
+  const query = filters.query?.trim();
+  if (query && !matchesServerLikeSubstring(task.fileName, query)) return false;
   const createdAt = Date.parse(task.createdAt);
   if (!Number.isFinite(createdAt)) return false;
   if (filters.createdFrom && createdAt < Date.parse(filters.createdFrom)) return false;
@@ -196,18 +239,24 @@ function taskMatchesFilters(
 export class TaskViewState {
   private readonly cache = new Map<string, AuditTaskDetail>();
   private readonly generations = new Map<string, number>();
+  private readonly lastAppliedReadSequences = new Map<string, number>();
   private readonly mutationVersions = new Map<string, number>();
   private readonly tombstones = new Set<string>();
   private visibleIds: string[] = [];
   private filters: VisibleTaskFilters = { limit: 80 };
   private epoch = 0;
+  private readSequence = 0;
   private stateVersion = 0;
 
   beginRead(id: string): TaskReadToken {
-    return { id, generation: this.currentGeneration(id) };
+    return {
+      id,
+      generation: this.currentGeneration(id),
+      readSequence: ++this.readSequence,
+    };
   }
 
-  beginAction(id: string): TaskReadToken {
+  beginAction(id: string): TaskActionToken {
     const generation = this.currentGeneration(id) + 1;
     this.generations.set(id, generation);
     this.mutationVersions.set(id, ++this.stateVersion);
@@ -220,8 +269,10 @@ export class TaskViewState {
       const task = this.cache.get(id);
       return task ? taskMatchesFilters(task, this.filters) : false;
     });
+    this.normalizeVisible();
     return {
       epoch: ++this.epoch,
+      readSequence: ++this.readSequence,
       stateVersion: this.stateVersion,
       generations: new Map(this.generations),
       filters: { ...this.filters },
@@ -229,28 +280,37 @@ export class TaskViewState {
   }
 
   applyRead(task: AuditTaskDetail, token: TaskReadToken) {
-    if (!this.accepts(task.id, token.generation)) return false;
-    const current = this.cache.get(task.id);
-    this.cache.set(task.id, mergeTaskByFreshness(current, task));
+    if (task.id !== token.id || !this.accepts(task.id, token.generation)) {
+      return false;
+    }
+    if (
+      token.readSequence <
+      (this.lastAppliedReadSequences.get(task.id) ?? 0)
+    ) {
+      return false;
+    }
+    this.cache.set(task.id, task);
+    this.lastAppliedReadSequences.set(task.id, token.readSequence);
     if (this.visibleIds.includes(task.id)) {
-      if (taskMatchesFilters(task, this.filters)) this.sortVisible();
+      if (taskMatchesFilters(task, this.filters)) this.normalizeVisible();
       else this.visibleIds = this.visibleIds.filter((id) => id !== task.id);
     }
     return true;
   }
 
-  applyAction(task: AuditTaskDetail, token: TaskReadToken, allowAdd: boolean) {
+  applyAction(task: AuditTaskDetail, token: TaskActionToken, allowAdd: boolean) {
     if (task.id !== token.id || this.currentGeneration(task.id) !== token.generation) {
       return false;
     }
     this.tombstones.delete(task.id);
     this.cache.set(task.id, task);
+    this.generations.set(task.id, token.generation + 1);
     this.mutationVersions.set(task.id, ++this.stateVersion);
     const wasVisible = this.visibleIds.includes(task.id);
     const matches = taskMatchesFilters(task, this.filters);
     if (matches && (wasVisible || allowAdd)) {
-      if (!wasVisible) this.visibleIds.push(task.id);
-      this.sortVisible();
+      if (!wasVisible) this.visibleIds.unshift(task.id);
+      this.normalizeVisible();
     } else if (wasVisible) {
       this.visibleIds = this.visibleIds.filter((id) => id !== task.id);
     }
@@ -265,26 +325,37 @@ export class TaskViewState {
       if (mutationVersion > read.stateVersion) continue;
       const generation = read.generations.get(task.id) ?? 0;
       if (!this.accepts(task.id, generation)) continue;
-      const current = this.cache.get(task.id);
-      this.cache.set(task.id, mergeTaskByFreshness(current, task));
+      if (
+        (this.lastAppliedReadSequences.get(task.id) ?? 0) >
+        read.readSequence
+      ) {
+        const current = this.cache.get(task.id);
+        if (current && taskMatchesFilters(current, read.filters)) {
+          nextIds.push(task.id);
+        }
+        continue;
+      }
+      this.cache.set(task.id, task);
+      this.lastAppliedReadSequences.set(task.id, read.readSequence);
       if (taskMatchesFilters(task, read.filters)) nextIds.push(task.id);
     }
     for (const [id, mutationVersion] of this.mutationVersions) {
       if (mutationVersion <= read.stateVersion || this.tombstones.has(id)) continue;
       const task = this.cache.get(id);
       if (task && taskMatchesFilters(task, read.filters) && !nextIds.includes(id)) {
-        nextIds.push(id);
+        nextIds.unshift(id);
       }
     }
     this.visibleIds = nextIds;
-    this.sortVisible();
+    this.normalizeVisible();
     return this.visibleTasks();
   }
 
-  markDeleted(id: string, token: TaskReadToken) {
+  markDeleted(id: string, token: TaskActionToken) {
     if (id !== token.id || this.currentGeneration(id) !== token.generation) return false;
     this.tombstones.add(id);
     this.cache.delete(id);
+    this.generations.set(id, token.generation + 1);
     this.mutationVersions.set(id, ++this.stateVersion);
     this.visibleIds = this.visibleIds.filter((visibleId) => visibleId !== id);
     return true;
@@ -309,12 +380,18 @@ export class TaskViewState {
     return !this.tombstones.has(id) && this.currentGeneration(id) === generation;
   }
 
-  private sortVisible() {
+  private normalizeVisible() {
     this.visibleIds.sort((leftId, rightId) => {
       const left = this.cache.get(leftId);
       const right = this.cache.get(rightId);
       return Date.parse(right?.createdAt ?? "") - Date.parse(left?.createdAt ?? "");
     });
+    const requestedLimit = this.filters.limit;
+    const limit =
+      Number.isSafeInteger(requestedLimit) && (requestedLimit ?? 0) > 0
+        ? requestedLimit!
+        : 80;
+    this.visibleIds = this.visibleIds.slice(0, limit);
   }
 }
 

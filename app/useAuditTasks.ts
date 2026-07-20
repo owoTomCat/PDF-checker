@@ -17,6 +17,7 @@ import {
   TaskPollingController,
   TaskViewState,
   browserPollingEnvironment,
+  detailFromTaskSummary,
   isActiveTask,
 } from "@/lib/client/task-coordinator";
 import {
@@ -28,19 +29,6 @@ import type { AuditTaskDetail, AuditTaskSummary } from "@/lib/types";
 
 const MAX_PARALLEL_UPLOADS = 3;
 const PDF_NOT_AVAILABLE_MESSAGE = "原始 PDF 已超过 3 天保留期，请重新上传文件。";
-
-function detailFromSummary(
-  summary: AuditTaskSummary,
-  previous?: AuditTaskDetail,
-): AuditTaskDetail {
-  const preserveReport =
-    previous && !isActiveTask(previous) && !isActiveTask(summary);
-  return {
-    ...summary,
-    reportText: preserveReport ? previous.reportText : null,
-    report: preserveReport ? previous.report : null,
-  };
-}
 
 function taskErrorMessage(error: unknown) {
   if (
@@ -148,7 +136,7 @@ export function useAuditTasks(filters: HistoryFilterOptions) {
           return;
         }
         const details = result.items.map((summary) =>
-          detailFromSummary(summary, viewState.task(summary.id)),
+          detailFromTaskSummary(summary, viewState.task(summary.id)),
         );
         viewState.completeList(details, read);
         publish();
@@ -260,7 +248,7 @@ export function useAuditTasks(filters: HistoryFilterOptions) {
           if (mountedRef.current) {
             const token = viewState.beginAction(summary.id);
             viewState.applyAction(
-              detailFromSummary(summary, viewState.task(summary.id)),
+              detailFromTaskSummary(summary, viewState.task(summary.id)),
               token,
               true,
             );
@@ -300,7 +288,7 @@ export function useAuditTasks(filters: HistoryFilterOptions) {
         );
         if (!mountedRef.current) return;
         viewState.applyAction(
-          detailFromSummary(summary, viewState.task(summary.id)),
+          detailFromTaskSummary(summary, viewState.task(summary.id)),
           token,
           false,
         );
