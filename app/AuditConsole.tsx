@@ -1,36 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAuditTasks } from "@/app/useAuditTasks";
 import {
-  runAiAuditPipeline,
-  type PipelineProgress,
-} from "@/lib/client/audit-pipeline";
-import { runWithConcurrency } from "@/lib/client/concurrency";
-import { createTaskId } from "@/lib/client/task-id";
-import {
-  filterHistoryTasks,
-  removeHistoryTasks,
-  upsertHistoryTask,
-  type HistoryDateFilter,
-} from "@/lib/client/task-history";
+  ACTIVE_TASK_STATUSES,
+  isActiveTask,
+} from "@/lib/client/task-coordinator";
+import { type HistoryDateFilter } from "@/lib/client/task-history";
 import type {
   AuditOutcome,
-  AuditTaskDetail,
   TaskStatus,
 } from "@/lib/types";
-
-const STORAGE_KEY = "pdf-audit-workspace.tasks.v4";
-const MAX_PARALLEL_TASKS = 3;
-const ACTIVE_STATUSES = new Set<TaskStatus>([
-  "queued",
-  "rendering",
-  "locating",
-  "recognizing",
-  "reviewing_urls",
-  "extracting_table",
-  "associating",
-  "finalizing",
-]);
 
 const statusCopy: Record<TaskStatus, string> = {
   queued: "排队中",
@@ -68,129 +48,9 @@ function formatTime(value: string | null) {
   }).format(new Date(value));
 }
 
-function normalizeStoredTask(value: unknown): AuditTaskDetail | null {
-  if (!value || typeof value !== "object") return null;
-  const task = value as Partial<AuditTaskDetail>;
-  if (
-    typeof task.id !== "string" ||
-    typeof task.fileName !== "string" ||
-    typeof task.fileSize !== "number" ||
-    typeof task.createdAt !== "string"
-  ) {
-    return null;
-  }
-  const now = new Date().toISOString();
-  const status =
-    task.status && statusCopy[task.status]
-      ? task.status
-      : ("failed" as const);
-  return {
-    id: task.id,
-    fileName: task.fileName.slice(0, 255),
-    fileSize: task.fileSize,
-    fileType: typeof task.fileType === "string" ? task.fileType : null,
-    status,
-    outcome: task.outcome ?? (status === "failed" ? "failed" : null),
-    model: task.model === "qwen3.7-plus" ? task.model : null,
-    progress: typeof task.progress === "number" ? task.progress : 0,
-    processedPages:
-      typeof task.processedPages === "number" ? task.processedPages : 0,
-    totalPages: typeof task.totalPages === "number" ? task.totalPages : null,
-    createdAt: task.createdAt,
-    updatedAt: typeof task.updatedAt === "string" ? task.updatedAt : now,
-    startedAt: typeof task.startedAt === "string" ? task.startedAt : null,
-    completedAt:
-      typeof task.completedAt === "string" ? task.completedAt : null,
-    errorCode:
-      typeof task.errorCode === "string" ? task.errorCode.slice(0, 100) : null,
-    errorMessage:
-      typeof task.errorMessage === "string"
-        ? task.errorMessage.slice(0, 1_000)
-        : null,
-    issueCount: typeof task.issueCount === "number" ? task.issueCount : null,
-    summary: task.summary ?? null,
-    pdfExpiresAt:
-      typeof task.pdfExpiresAt === "string" ? task.pdfExpiresAt : null,
-    pdfAvailable: task.pdfAvailable === true,
-    reportText:
-      typeof task.reportText === "string"
-        ? task.reportText.slice(0, 1_000_000)
-        : null,
-    report: task.report ?? null,
-  };
-}
-
-function readStoredTasks(): AuditTaskDetail[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map(normalizeStoredTask)
-      .filter((task): task is AuditTaskDetail => task !== null)
-      .slice(0, 80);
-  } catch {
-    return [];
-  }
-}
-
-function writeStoredTasks(tasks: AuditTaskDetail[]) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks.slice(0, 80)));
-}
-
-function createQueuedTask(file: File): AuditTaskDetail {
-  const now = new Date().toISOString();
-  return {
-    id: createTaskId(),
-    fileName: file.name,
-    fileSize: file.size,
-    fileType: file.type || "application/pdf",
-    status: "queued",
-    outcome: null,
-    model: "qwen3.7-plus",
-    progress: 2,
-    processedPages: 0,
-    totalPages: null,
-    createdAt: now,
-    updatedAt: now,
-    startedAt: null,
-    completedAt: null,
-    errorCode: null,
-    errorMessage: null,
-    issueCount: null,
-    summary: null,
-    pdfExpiresAt: null,
-    pdfAvailable: false,
-    reportText: null,
-    report: null,
-  };
-}
-
-function statusFromProgress(progress: PipelineProgress): TaskStatus {
-  return progress.stage;
-}
-
-function outcomeNotice(outcome: AuditOutcome, issueCount: number) {
-  if (outcome === "passed") return "AI 核验完成，未发现规则问题。";
-  if (outcome === "issues_found") {
-    return `AI 核验完成，发现 ${issueCount} 项问题。`;
-  }
-  if (outcome === "needs_review") {
-    return "AI 已完成识别，但证据不完整，结果需要人工复核。";
-  }
-  return "PDF 处理失败。";
-}
-
 export function AuditConsole() {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const fileCacheRef = useRef(new Map<string, File>());
-  const [tasks, setTasks] = useState<AuditTaskDetail[]>([]);
-  const [historyReady, setHistoryReady] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyDateFilter, setHistoryDateFilter] =
@@ -200,41 +60,27 @@ export function AuditConsole() {
   const [checkedTaskIds, setCheckedTaskIds] = useState<Set<string>>(
     new Set(),
   );
-
-  useEffect(() => {
-    const loadTimer = window.setTimeout(() => {
-      setTasks(readStoredTasks());
-      setHistoryReady(true);
-    }, 0);
-    return () => window.clearTimeout(loadTimer);
-  }, []);
-
-  useEffect(() => {
-    if (!historyReady) return;
-    let errorTimer: number | null = null;
-    try {
-      writeStoredTasks(tasks);
-    } catch {
-      errorTimer = window.setTimeout(
-        () => setNotice("历史记录未能保存到浏览器。"),
-        0,
-      );
-    }
-    return () => {
-      if (errorTimer !== null) window.clearTimeout(errorTimer);
-    };
-  }, [historyReady, tasks]);
-
-  const filteredTasks = useMemo(
-    () =>
-      filterHistoryTasks(tasks, {
-        query: historyQuery,
-        dateFilter: historyDateFilter,
-        customStart,
-        customEnd,
-      }),
-    [customEnd, customStart, historyDateFilter, historyQuery, tasks],
+  const filters = useMemo(
+    () => ({
+      query: historyQuery,
+      dateFilter: historyDateFilter,
+      customStart,
+      customEnd,
+    }),
+    [customEnd, customStart, historyDateFilter, historyQuery],
   );
+  const {
+    tasks,
+    loading,
+    uploading,
+    notice,
+    refresh,
+    uploadFiles: uploadServerFiles,
+    retry,
+    remove,
+    loadTaskDetails,
+  } = useAuditTasks(filters);
+  const filteredTasks = tasks;
 
   const selectedTask = useMemo(
     () =>
@@ -243,11 +89,12 @@ export function AuditConsole() {
       null,
     [filteredTasks, selectedId],
   );
+  const selectedTaskId = selectedTask?.id ?? null;
 
   const selectableFilteredIds = useMemo(
     () =>
       filteredTasks
-        .filter((task) => !ACTIVE_STATUSES.has(task.status))
+        .filter((task) => !isActiveTask(task))
         .map((task) => task.id),
     [filteredTasks],
   );
@@ -256,7 +103,7 @@ export function AuditConsole() {
     () =>
       [...checkedTaskIds].filter((id) => {
         const task = tasks.find((item) => item.id === id);
-        return task && !ACTIVE_STATUSES.has(task.status);
+        return task && !isActiveTask(task);
       }),
     [checkedTaskIds, tasks],
   );
@@ -265,128 +112,17 @@ export function AuditConsole() {
     selectableFilteredIds.length > 0 &&
     selectableFilteredIds.every((id) => checkedTaskIds.has(id));
 
-  const updateTask = useCallback((task: AuditTaskDetail) => {
-    setTasks((current) => upsertHistoryTask(current, task));
-  }, []);
-
-  const processTask = useCallback(
-    async (task: AuditTaskDetail, file: File) => {
-      let current: AuditTaskDetail = {
-        ...task,
-        status: "rendering",
-        progress: 5,
-        startedAt: task.startedAt ?? new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        completedAt: null,
-        errorMessage: null,
-        outcome: null,
-      };
-      updateTask(current);
-
-      try {
-        const result = await runAiAuditPipeline(file, {
-          onProgress(progress) {
-            current = {
-              ...current,
-              status: statusFromProgress(progress),
-              progress: progress.progress,
-              processedPages: progress.processedPages,
-              totalPages: progress.totalPages,
-              updatedAt: new Date().toISOString(),
-            };
-            updateTask(current);
-          },
-        });
-        const completed: AuditTaskDetail = {
-          ...current,
-          status: "completed",
-          outcome: result.outcome,
-          model: result.model,
-          progress: 100,
-          processedPages: result.summary.pageCount,
-          totalPages: result.summary.pageCount,
-          completedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          errorMessage: null,
-          issueCount: result.report.issues.length,
-          summary: result.summary,
-          reportText: result.reportText,
-          report: result.report,
-        };
-        updateTask(completed);
-        setNotice(
-          outcomeNotice(result.outcome, result.report.issues.length),
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "PDF 处理失败。";
-        const failed: AuditTaskDetail = {
-          ...current,
-          status: "failed",
-          outcome: "failed",
-          progress: 100,
-          completedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          errorMessage: message,
-        };
-        updateTask(failed);
-        setNotice(message);
-      }
-    },
-    [updateTask],
-  );
-
   const uploadFiles = useCallback(
-    async (fileList: FileList | File[]) => {
-      const files = Array.from(fileList).filter(
-        (file) =>
-          file.type === "application/pdf" ||
-          file.name.toLowerCase().endsWith(".pdf"),
-      );
-      if (files.length === 0) {
-        setNotice("请上传 PDF 文件。");
-        return;
-      }
-
-      setBusy(true);
-      setNotice(
-        `已接收 ${files.length} 个 PDF，最多同时处理 ${MAX_PARALLEL_TASKS} 个。`,
-      );
-      try {
-        const queuedTasks = files.map((file) => {
-          const task = createQueuedTask(file);
-          fileCacheRef.current.set(task.id, file);
-          updateTask(task);
-          return task;
-        });
-        setSelectedId(queuedTasks[0]?.id ?? null);
-        await runWithConcurrency(
-          queuedTasks,
-          MAX_PARALLEL_TASKS,
-          async (task) => {
-            const file = fileCacheRef.current.get(task.id);
-            if (file) await processTask(task, file);
-          },
-        );
-      } finally {
-        setBusy(false);
+    (fileList: FileList | File[]) =>
+      uploadServerFiles(fileList).finally(() => {
         if (inputRef.current) inputRef.current.value = "";
-      }
-    },
-    [processTask, updateTask],
+      }),
+    [uploadServerFiles],
   );
 
-  const runTask = useCallback(
-    async (id: string) => {
-      const task = tasks.find((item) => item.id === id);
-      const file = fileCacheRef.current.get(id);
-      if (!task || !file) {
-        setNotice("历史结果可以直接回看；重新处理需要再次选择原 PDF 文件。");
-        return;
-      }
-      await processTask(task, file);
-    },
-    [processTask, tasks],
-  );
+  useEffect(() => {
+    if (selectedTaskId) return loadTaskDetails(selectedTaskId);
+  }, [loadTaskDetails, selectedTaskId]);
 
   const toggleAllFilteredTasks = useCallback(() => {
     setCheckedTaskIds((current) => {
@@ -401,38 +137,23 @@ export function AuditConsole() {
   }, [allFilteredChecked, selectableFilteredIds]);
 
   const deleteTaskIds = useCallback(
-    (requestedIds: ReadonlySet<string>, confirmation: string) => {
-      const deletableIds = new Set(
-        tasks
-          .filter(
-            (task) =>
-              requestedIds.has(task.id) &&
-              !ACTIVE_STATUSES.has(task.status),
-          )
-          .map((task) => task.id),
-      );
-      if (deletableIds.size === 0) {
-        setNotice("处理中任务不能删除。");
-        return;
-      }
-      if (!window.confirm(confirmation)) return;
-
-      deletableIds.forEach((id) => fileCacheRef.current.delete(id));
-      setTasks((current) => removeHistoryTasks(current, deletableIds));
+    async (requestedIds: ReadonlySet<string>, confirmation: string) => {
+      const deleted = await remove(requestedIds, confirmation);
+      if (deleted.length === 0) return;
+      const deletedSet = new Set(deleted);
       setCheckedTaskIds((current) => {
         const next = new Set(current);
-        deletableIds.forEach((id) => next.delete(id));
+        deleted.forEach((id) => next.delete(id));
         return next;
       });
       setSelectedId((current) =>
-        current && deletableIds.has(current) ? null : current,
+        current && deletedSet.has(current) ? null : current,
       );
-      setNotice(`已删除 ${deletableIds.size} 条历史任务。`);
     },
-    [tasks],
+    [remove],
   );
 
-  const activeCount = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)).length;
+  const activeCount = tasks.filter(isActiveTask).length;
   const reviewCount = tasks.filter(
     (task) => task.outcome === "needs_review",
   ).length;
@@ -448,7 +169,7 @@ export function AuditConsole() {
           <p className="eyebrow">Qwen AI Audit Workspace</p>
           <h1>外网溯源结果报告自动核验台</h1>
           <p className="hero-text">
-            浏览器先定位并裁剪相互隔离的证书、网页截图、地址栏和汇总表区域；阿里云百炼的
+            原始 PDF 私密上传到服务器后，由三路后台任务并行处理；阿里云百炼的
             qwen3.7-plus 分阶段识别，最后由确定性规则复核网址、时间和字段一致性。
           </p>
           <div className="hero-actions">
@@ -506,16 +227,16 @@ export function AuditConsole() {
         <div>
           <h2>拖入或选择外网溯源报告</h2>
           <p>
-            原始 PDF 留在当前浏览器；只有定位用页面图和隔离后的证据裁剪图会发送到应用服务端及阿里云百炼。
-            截图裁剪看不到汇总表，每条地址栏都使用 600 DPI 彩色与灰度增强图分别复核；图片不保存。
+            原始 PDF 会私密上传到服务器处理，本地副本默认保留 72 小时后自动清理；任务记录和核验报告继续保留。
+            页面图和隔离后的证据裁剪图只在任务处理期间使用，不通过公开地址提供。
           </p>
         </div>
         <button
           type="button"
-          disabled={busy}
+          disabled={uploading}
           onClick={() => inputRef.current?.click()}
         >
-          {busy ? "处理中" : "选择文件"}
+          {uploading ? "上传中" : "选择文件"}
         </button>
       </section>
 
@@ -526,13 +247,14 @@ export function AuditConsole() {
           <div className="panel-heading">
             <div>
               <p className="eyebrow">History</p>
-              <h2>浏览器历史</h2>
+              <h2>服务器历史</h2>
             </div>
             <button
               type="button"
               className="ghost"
+              disabled={loading}
               onClick={() => {
-                setTasks(readStoredTasks());
+                refresh();
                 setCheckedTaskIds(new Set());
               }}
             >
@@ -635,7 +357,9 @@ export function AuditConsole() {
           </div>
 
           <div className="task-list">
-            {tasks.length === 0 ? (
+            {loading && tasks.length === 0 ? (
+              <div className="empty">正在读取服务器任务...</div>
+            ) : tasks.length === 0 ? (
               <div className="empty">还没有任务。上传 PDF 后会显示在这里。</div>
             ) : filteredTasks.length === 0 ? (
               <div className="empty">没有符合条件的历史任务。</div>
@@ -650,7 +374,7 @@ export function AuditConsole() {
                     type="checkbox"
                     aria-label={`选择任务：${task.fileName}`}
                     checked={checkedTaskIds.has(task.id)}
-                    disabled={ACTIVE_STATUSES.has(task.status)}
+                    disabled={ACTIVE_TASK_STATUSES.has(task.status)}
                     onChange={(event) => {
                       const checked = event.currentTarget.checked;
                       setCheckedTaskIds((current) => {
@@ -689,7 +413,7 @@ export function AuditConsole() {
                     type="button"
                     className="task-delete"
                     aria-label={`删除任务：${task.fileName}`}
-                    disabled={ACTIVE_STATUSES.has(task.status)}
+                    disabled={ACTIVE_TASK_STATUSES.has(task.status)}
                     onClick={() =>
                       deleteTaskIds(
                         new Set([task.id]),
@@ -722,8 +446,8 @@ export function AuditConsole() {
                 <button
                   type="button"
                   className="ghost"
-                  onClick={() => void runTask(selectedTask.id)}
-                  disabled={ACTIVE_STATUSES.has(selectedTask.status)}
+                  onClick={() => void retry(selectedTask.id)}
+                  disabled={isActiveTask(selectedTask)}
                 >
                   重新处理
                 </button>
@@ -825,7 +549,7 @@ export function AuditConsole() {
                 <h3>完整中文报告</h3>
                 <pre>
                   {selectedTask.reportText ??
-                    (ACTIVE_STATUSES.has(selectedTask.status)
+                    (isActiveTask(selectedTask)
                       ? "qwen3.7-plus 正在处理，请稍候..."
                       : "暂无报告。")}
                 </pre>

@@ -6,38 +6,8 @@ import {
   StrictFinalAuditResponseSchema,
   TableApiResponseSchema,
   UrlReviewApiResponseSchema,
-  type StrictFinalAuditResponse,
 } from "../ai/contracts";
-import type {
-  AuditStageGateway,
-  RenderedImage,
-  RenderedPdfDocument,
-} from "../audit/gateway";
-import {
-  runAuditPipeline,
-  validatePdfFile,
-  type PipelineProgress,
-} from "../audit/pipeline";
-
-export {
-  URL_REVIEW_DPI,
-  chunkPageNumbers,
-  validatePdfFile,
-  type PipelineProgress,
-  type PipelineStage,
-} from "../audit/pipeline";
-export type { RenderedPdfDocument } from "../audit/gateway";
-
-type PipelineOptions = {
-  fetchImpl?: typeof fetch;
-  openPdf?: (file: File) => Promise<RenderedPdfDocument>;
-  onProgress?: (progress: PipelineProgress) => void | Promise<void>;
-};
-
-async function defaultOpenPdf(file: File) {
-  const { openPdfForRendering } = await import("./pdf-renderer");
-  return openPdfForRendering(file);
-}
+import type { AuditStageGateway, RenderedImage } from "../audit/gateway";
 
 async function responseJson(response: Response) {
   let body: unknown;
@@ -153,20 +123,4 @@ export function createHttpAuditGateway(
       );
     },
   };
-}
-
-export async function runAiAuditPipeline(
-  file: File,
-  options: PipelineOptions = {},
-): Promise<StrictFinalAuditResponse> {
-  validatePdfFile(file);
-  const pdf = await (options.openPdf ?? defaultOpenPdf)(file);
-  return runAuditPipeline({
-    fileName: file.name,
-    fileSize: file.size,
-    fileType: file.type || null,
-    pdf,
-    gateway: createHttpAuditGateway(options.fetchImpl ?? fetch),
-    onProgress: options.onProgress,
-  });
 }

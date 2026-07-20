@@ -10,18 +10,20 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
     page,
     layout,
     consoleSource,
-    clientPipelineSource,
     auditPipelineSource,
-    rendererSource,
+    taskApiSource,
+    taskHookSource,
+    taskCoordinatorSource,
     readme,
     specification,
   ] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/AuditConsole.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../lib/client/audit-pipeline.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/audit/pipeline.ts", import.meta.url), "utf8"),
-    readFile(new URL("../lib/client/pdf-renderer.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/client/task-api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/useAuditTasks.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/client/task-coordinator.ts", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../docs/spec-qwen-ai-pipeline.md", import.meta.url), "utf8"),
   ]);
@@ -30,25 +32,9 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   assert.match(layout, /lang="zh-CN"/);
   assert.match(page, /<AuditConsole \/>/);
   assert.match(consoleSource, /外网溯源结果报告自动核验台/);
-  assert.match(consoleSource, /runAiAuditPipeline/);
-  assert.match(consoleSource, /localStorage/);
-  assert.match(consoleSource, /useState<AuditTaskDetail\[\]>\(\[\]\)/);
-  assert.match(consoleSource, /MAX_PARALLEL_TASKS\s*=\s*3/);
-  assert.match(
-    consoleSource,
-    /runWithConcurrency\(\s*queuedTasks,\s*MAX_PARALLEL_TASKS/,
-  );
-  assert.match(
-    consoleSource,
-    /setTasks\(\(current\)\s*=>\s*upsertHistoryTask\(current, task\)\)/,
-  );
-  assert.match(
-    consoleSource,
-    /const \[historyReady, setHistoryReady\] = useState\(false\)/,
-  );
-  assert.match(consoleSource, /if \(!historyReady\) return/);
-  assert.match(consoleSource, /writeStoredTasks\(tasks\)/);
-  assert.doesNotMatch(consoleSource, /for \(const task of queuedTasks\)/);
+  assert.match(consoleSource, /useAuditTasks\(/);
+  assert.doesNotMatch(consoleSource, /runAiAuditPipeline|fileCacheRef|pdfjs-dist/);
+  assert.doesNotMatch(consoleSource, /readStoredTasks|writeStoredTasks|createQueuedTask|processTask/);
   for (const copy of [
     "搜索任务名称",
     "时间范围",
@@ -58,59 +44,40 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   ]) {
     assert.match(consoleSource, new RegExp(copy));
   }
-  assert.match(consoleSource, /filterHistoryTasks\(/);
-  assert.match(consoleSource, /removeHistoryTasks\(/);
+  assert.match(consoleSource, /服务器历史/);
   assert.match(consoleSource, /className="task-open"/);
   assert.match(consoleSource, /className="task-delete"/);
   assert.doesNotMatch(
     consoleSource,
     /<button[\s\S]{0,160}className=\{`task-row/,
   );
-  assert.match(
-    consoleSource,
-    /useEffect\(\(\) => \{\s*const loadTimer = window\.setTimeout\(\(\) => \{\s*setTasks\(readStoredTasks\(\)\);\s*setHistoryReady\(true\);\s*\}, 0\);\s*return \(\) => window\.clearTimeout\(loadTimer\);\s*\}, \[\]\)/s,
-  );
-  assert.doesNotMatch(
-    consoleSource,
-    /useState<AuditTaskDetail\[\]>\(readStoredTasks\)/,
-  );
   assert.match(consoleSource, /qwen3\.7-plus/);
-  assert.match(consoleSource, /定位用页面图/);
+  assert.match(consoleSource, /私密上传到服务器/);
+  assert.match(consoleSource, /72\s*小时/);
   assert.match(consoleSource, /阿里云百炼/);
   assert.match(consoleSource, /需人工复核/);
   assert.match(consoleSource, /问题列表/);
   assert.match(consoleSource, /人工复核项/);
-  assert.match(consoleSource, /pdf-audit-workspace\.tasks\.v4/);
-  for (const endpoint of [
-    "layout",
-    "recognize-evidence",
-    "review-url",
-    "extract-table",
-    "associate",
-  ]) {
-    assert.match(clientPipelineSource, new RegExp(`/api/audit/${endpoint}`));
-  }
-  assert.match(clientPipelineSource, /\/api\/audit\/finalize/);
-  assert.match(clientPipelineSource, /runAuditPipeline\(/);
-  assert.doesNotMatch(
-    clientPipelineSource,
-    /splitRenderedByBytes|stage:\s*"rendering"/,
-  );
+  assert.match(taskHookSource, /localStorage/);
+  assert.match(taskApiSource, /\/api\/tasks/);
+  assert.match(taskCoordinatorSource, /2_000|2000/);
+  assert.match(taskCoordinatorSource, /5_000|5000/);
+  assert.match(taskHookSource, /250/);
+  assert.match(taskHookSource, /deletedVersionRef\.current\.has\(incoming\.id\)/);
+  assert.match(consoleSource, /return loadTaskDetails\(selectedTaskId\)/);
   assert.match(auditPipelineSource, /export async function runAuditPipeline/);
   assert.doesNotMatch(
     auditPipelineSource,
     /\bfetch\b|\bwindow\b|defaultOpenPdf|pdf-renderer|FormData|new File/,
   );
-  assert.doesNotMatch(clientPipelineSource, /\/api\/audit\/extract["']/);
   assert.match(readme, /截图裁剪看不到汇总表/);
   assert.match(readme, /600 DPI/);
   assert.match(readme, /彩色.*灰度|灰度.*彩色/s);
   assert.match(specification, /\/api\/audit\/review-url/);
   assert.doesNotMatch(specification, /POST \/api\/audit\/extract\s/);
-  assert.doesNotMatch(rendererSource, /getTextContent/);
   assert.doesNotMatch(consoleSource, /runAuditFromPdf/);
   assert.doesNotMatch(consoleSource, /PDF 不会上传到服务器/);
-  assert.doesNotMatch(consoleSource, /\/api\/tasks/);
+  assert.match(taskHookSource + taskApiSource, /\/api\/tasks/);
   assert.doesNotMatch(page + layout + consoleSource, /codex-preview|react-loading-skeleton/);
 });
 
@@ -129,6 +96,7 @@ test("removes the legacy local parser, storage adapter, and run route", async ()
     "../lib/audit-runner.ts",
     "../lib/server/storage.ts",
     "../app/api/tasks/[id]/run/route.ts",
+    "../lib/client/pdf-renderer.ts",
   ];
 
   for (const path of legacyPaths) {

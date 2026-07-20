@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   filterHistoryTasks,
+  historyFiltersToTaskListFilters,
   removeHistoryTasks,
   upsertHistoryTask,
 } from "../lib/client/task-history";
@@ -155,4 +156,24 @@ test("removes only requested task IDs and ignores missing IDs", () => {
     "custom-start",
     "old",
   ]);
+});
+
+test("converts local calendar filters into bounded server query timestamps", () => {
+  assert.deepEqual(
+    historyFiltersToTaskListFilters(
+      {
+        query: "  Alpha  ",
+        dateFilter: "7d",
+        customStart: "",
+        customEnd: "",
+      },
+      now,
+    ),
+    {
+      query: "Alpha",
+      createdFrom: new Date(2026, 6, 12).toISOString(),
+      createdTo: new Date(2026, 6, 19).toISOString(),
+      limit: 80,
+    },
+  );
 });
