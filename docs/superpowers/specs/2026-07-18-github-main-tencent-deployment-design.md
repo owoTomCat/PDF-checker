@@ -1,30 +1,117 @@
-# GitHub Main 与腾讯云部署设计
+# GitHub main 与腾讯云部署设计
 
-## 目标
+## 目标与边界
 
-- 以当前 `codex/strict-audit-rules` 的提交树覆盖 GitHub `main`，旧 `main` 不再作为默认代码。
-- 在腾讯云 Ubuntu 24.04 服务器部署同一 `main` 提交。
-- 通过 `http://[2402:4e00:1420:900:3c84:524:bcf4:0]/` 直接访问应用。
-- API Key 只保存在服务器 `/etc/pdf-checker.env`，不进入 Git 历史。
+GitHub `main` 对应腾讯云 Ubuntu 24.04 上的同一发布提交。应用代码位于 `/opt/pdf-checker/current`，私有 PDF、SQLite 数据库和备份位于 `/var/lib/pdf-checker`。发布、回滚或代码目录切换绝不能清除该数据目录。
 
-## GitHub 发布
+部署运行两个相互独立的 systemd 服务：
 
-- 发布前记录远端旧 `main` 提交 `6e3d630f7ac36ff7d4308e41ce71eaea567dbdac`。
-- 使用 `--force-with-lease` 把当前 HEAD 写入 `refs/heads/main`；若发布期间远端 `main` 被其他人更新则拒绝覆盖。
-- GitHub 默认分支保持 `main`，不创建中间 PR。
+1. `pdf-checker.service` 提供 web 页面和任务 API，监听本机 `127.0.0.1:3000`。
+2. `pdf-checker-worker.service` 运行已构建的 `dist/audit-worker.mjs`，从同一个 SQLite 队列领取任务。
 
-## 服务器结构
+Nginx 监听 IPv4/IPv6 80 端口并代理到 web 服务，`client_max_body_size 25m` 保持不变。上传接口只在私有文件和 SQLite 排队记录都成功写入后返回；模型处理由独立 worker 完成，所以浏览器断开不会中断任务。
 
-- 代码目录：`/opt/pdf-checker/current`，从 GitHub `main` 克隆。
-- Node：官方 Node.js 24 x64 发行包，安装到 `/opt`，通过 `/usr/local/bin` 提供命令。
-- 依赖与构建：`npm ci` 后执行 `npm run build`。
-- 常驻进程：`pdf-checker.service` 以 `ubuntu` 用户运行 `scripts/run-vinext.mjs start`，监听本机 3000 端口并随系统启动。
-- 入口：Nginx 同时监听 IPv4/IPv6 80 端口，反向代理到 `127.0.0.1:3000`，请求体上限 25 MiB，模型调用超时 300 秒。
-- 密钥：把本地忽略的 `.env.local` 安装为 root-only 的 `/etc/pdf-checker.env`。
+## 发布前提
 
-## 验证与回滚
+- 使用 Node 24（满足项目声明的 `>=22.13.0`）与 npm。
+- 运行 `npm ci && npm run build`；发布产物必须同时包含 web 构建和 `dist/audit-worker.mjs`。
+- 在 Linux 上确认 `@napi-rs/canvas` 的原生依赖可由生产 Node 加载。
+- 百炼连接配置只保存在服务器 `/etc/pdf-checker.env`；不写入 Git、systemd unit、文档、日志或接口响应。
 
-- 发布前运行完整测试、类型检查和 lint。
-- 服务器验证 `npm run build`、`systemd-analyze verify`、`nginx -t`、服务状态和本机 HTTP 200。
-- 客户端通过公网 IPv6 请求页面，并运行一个 PDF 案例确认模型链路。
-- GitHub 回滚可将记录的旧提交重新推送到 `main`；服务器回滚可检出目标提交、重新构建并重启服务。
+## 私有数据目录和 systemd 安装
+
+在 `/opt/pdf-checker/current` 的目标发布版本中构建后，使用精确命令安装目录和 unit：
+
+```bash
+cd /opt/pdf-checker/current
+npm ci
+npm run build
+test -f dist/audit-worker.mjs
+
+sudo install -d -o ubuntu -g ubuntu -m 0700 /var/lib/pdf-checker
+sudo install -d -o ubuntu -g ubuntu -m 0700 /var/lib/pdf-checker/data
+sudo install -d -o ubuntu -g ubuntu -m 0700 /var/lib/pdf-checker/uploads
+sudo install -d -o ubuntu -g ubuntu -m 0700 /var/lib/pdf-checker/data/backups
+sudo install -o root -g root -m 0644 deploy/pdf-checker.service /etc/systemd/system/pdf-checker.service
+sudo install -o root -g root -m 0644 deploy/pdf-checker-worker.service /etc/systemd/system/pdf-checker-worker.service
+sudo systemctl daemon-reload
+```
+
+两个服务均以 `ubuntu:ubuntu` 运行，使用 `UMask=0077`，并只被允许写入 `/var/lib/pdf-checker`。两者都必须通过非可选的 `EnvironmentFile=/etc/pdf-checker.env` 启动；环境文件缺失应让服务失败，而不是以不完整配置运行。
+
+## 生产环境变量和访问控制
+
+用 `sudoedit /etc/pdf-checker.env` 更新服务器密钥文件，然后确认它是 `root:root`、模式 `0600`。禁止用 `cat /etc/pdf-checker.env` 读取或把它发送到日志、工单或聊天记录。
+
+保留已有的百炼连接变量，并添加：
+
+```dotenv
+PDF_AUDIT_DATA_DIR=/var/lib/pdf-checker
+PDF_AUDIT_PDF_RETENTION_HOURS=72
+PDF_AUDIT_WORKER_CONCURRENCY=3
+PDF_AUDIT_WORKER_POLL_MS=1000
+PDF_AUDIT_SINGLE_TENANT_OWNER=shared-server
+```
+
+当前腾讯云服务使用单租户共享历史模式，必须设置 `PDF_AUDIT_REQUIRE_AUTH=false`。在此模式中所有网络客户端共享相同任务历史和删除权限；腾讯云安全组/防火墙或前置反向代理必须只允许受信用户访问。这不是公开或多用户部署的可接受配置。
+
+当可信认证代理可提供 `oai-authenticated-user-email` 时，改为 `PDF_AUDIT_REQUIRE_AUTH=true`，并将 `PDF_AUDIT_SINGLE_TENANT_OWNER` 留空。服务端只信任该代理提供的认证头，不接受浏览器伪造的身份。
+
+```bash
+sudo chown root:root /etc/pdf-checker.env
+sudo chmod 0600 /etc/pdf-checker.env
+sudo systemctl enable --now pdf-checker.service pdf-checker-worker.service
+```
+
+web 不依赖 worker 成功启动；worker 暂时不可用时，web 仍可接收上传、显示任务历史和状态，worker 恢复后继续领取队列。
+
+## 状态、日志与健康检查
+
+先验证 unit 和 Nginx，再分别检查服务。日志必须有上限，不能打印环境文件、PDF 内容、渲染图、原始模型响应、认证头或完整报告。
+
+```bash
+sudo systemd-analyze verify /etc/systemd/system/pdf-checker.service /etc/systemd/system/pdf-checker-worker.service
+sudo nginx -t
+sudo systemctl is-active pdf-checker.service pdf-checker-worker.service nginx.service
+sudo journalctl -u pdf-checker.service -n 100 --no-pager
+sudo journalctl -u pdf-checker-worker.service -n 100 --no-pager
+curl -fsS http://127.0.0.1:3000/ > /dev/null
+sudo -u ubuntu sqlite3 /var/lib/pdf-checker/data/pdf-checker.sqlite "SELECT status, COUNT(*) AS task_count FROM audit_tasks GROUP BY status;"
+sudo stat -c '%a %U:%G %n' /var/lib/pdf-checker /var/lib/pdf-checker/data /var/lib/pdf-checker/uploads
+sudo du -sh /var/lib/pdf-checker
+```
+
+队列 SQL 仅输出状态和计数，不输出 PDF 文件名、路径、报告或密钥。HTTP 检查证明 web 服务可响应；它不替代一次真实 PDF 的完整验收。
+
+## 数据保留、备份和恢复
+
+worker 会在启动及周期性清理中删除超过 72 小时的终态 PDF，不会删除 queued 或 active PDF。验证清理时检查 `pdf_deleted_at` 和文件计数变化，同时确认任务结果仍可查询；不要通过人工删除活动任务来测试。
+
+SQLite 运行时采用 WAL，禁止对活跃数据库进行裸 `cp`。推荐在线 SQLite 备份：
+
+```bash
+sudo -u ubuntu sqlite3 /var/lib/pdf-checker/data/pdf-checker.sqlite ".backup '/var/lib/pdf-checker/data/backups/pdf-checker-$(date +%F-%H%M%S).sqlite'"
+```
+
+维护窗口也可先停止两个服务，再连同数据目录中必要文件进行备份与恢复；恢复前用 SQLite 打开备份验证。备份包含私有任务结果和可能仍在保留期内的 PDF，必须继续限制为 `ubuntu` 可读的私有目录。
+
+## 更新与回滚顺序
+
+先让 worker 停止领取新任务，再停 web；更新或检出目标 Git 提交，执行依赖安装和完整构建，重新安装两个 unit，然后启动 web 和 worker：
+
+```bash
+sudo systemctl stop pdf-checker-worker.service
+sudo systemctl stop pdf-checker.service
+cd /opt/pdf-checker/current
+# 切换到目标提交后：
+npm ci
+npm run build
+test -f dist/audit-worker.mjs
+sudo install -o root -g root -m 0644 deploy/pdf-checker.service /etc/systemd/system/pdf-checker.service
+sudo install -o root -g root -m 0644 deploy/pdf-checker-worker.service /etc/systemd/system/pdf-checker-worker.service
+sudo systemctl daemon-reload
+sudo systemctl restart pdf-checker.service
+sudo systemctl restart pdf-checker-worker.service
+```
+
+此顺序允许 web 先独立恢复，而 worker 随后处理积压任务。回滚只切换代码和重启服务，不覆盖 `/var/lib/pdf-checker`；完成后重跑 unit、服务、bounded journal、HTTP、队列计数、权限和容量检查。

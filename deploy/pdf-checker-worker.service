@@ -1,5 +1,5 @@
 [Unit]
-Description=PDF external-source audit workspace
+Description=PDF external-source audit worker
 Wants=network-online.target
 After=network-online.target
 
@@ -9,9 +9,8 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/opt/pdf-checker/current
 Environment=NODE_ENV=production
-Environment=PORT=3000
 EnvironmentFile=/etc/pdf-checker.env
-ExecStart=/usr/local/bin/node scripts/run-vinext.mjs start
+ExecStart=/usr/local/bin/node /opt/pdf-checker/current/dist/audit-worker.mjs
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
