@@ -95,7 +95,7 @@ export type FailTaskInput = {
   now: string;
 };
 
-export const TASK_FAILURE_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+export const TASK_FAILURE_MESSAGES = Object.freeze({
   INVALID_PDF_UPLOAD: "The uploaded PDF is invalid.",
   PDF_TOO_LARGE: "The PDF exceeds the supported size limit.",
   PDF_ENCRYPTED: "The PDF is encrypted and cannot be processed.",
@@ -106,12 +106,20 @@ export const TASK_FAILURE_MESSAGES: Readonly<Record<string, string>> = Object.fr
   MODEL_UNAVAILABLE: "The audit service is temporarily unavailable.",
   INVALID_MODEL_OUTPUT: "The audit result could not be validated.",
   WORKER_RETRY_EXHAUSTED: "The task could not be completed after repeated attempts.",
+  INTERNAL_ERROR: "The audit could not be completed.",
 });
 
-const UNKNOWN_TASK_FAILURE_MESSAGE = "The audit could not be completed.";
+export type TaskFailureCode = keyof typeof TASK_FAILURE_MESSAGES;
 
-function safeFailureMessage(errorCode: string): string {
-  return TASK_FAILURE_MESSAGES[errorCode] ?? UNKNOWN_TASK_FAILURE_MESSAGE;
+function normalizeFailure(errorCode: string): { code: TaskFailureCode; message: string } {
+  if (Object.hasOwn(TASK_FAILURE_MESSAGES, errorCode)) {
+    const code = errorCode as TaskFailureCode;
+    return { code, message: TASK_FAILURE_MESSAGES[code] };
+  }
+  return {
+    code: "INTERNAL_ERROR",
+    message: TASK_FAILURE_MESSAGES.INTERNAL_ERROR,
+  };
 }
 
 function parseJson<T>(value: string | null, parse: (input: unknown) => T): T | null {
@@ -308,13 +316,14 @@ export class TaskRepository {
   }
 
   fail(input: FailTaskInput): AuditTaskDetail | null {
+    const failure = normalizeFailure(input.errorCode);
     const result = this.db.prepare(`
       UPDATE audit_tasks
       SET status = 'failed', error_code = ?, error_message = ?, updated_at = ?, completed_at = ?
       WHERE id = ? AND status NOT IN ('completed', 'failed')
     `).run(
-      input.errorCode,
-      safeFailureMessage(input.errorCode),
+      failure.code,
+      failure.message,
       input.now,
       input.now,
       input.id,
@@ -328,6 +337,7 @@ export class TaskRepository {
     const activeStatuses = ACTIVE_STATUSES.map(() => "?").join(", ");
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const failure = normalizeFailure("WORKER_RETRY_EXHAUSTED");
       this.db.prepare(`
         UPDATE audit_tasks
         SET status = 'queued', progress = 0, processed_pages = 0,
@@ -342,8 +352,8 @@ export class TaskRepository {
       `).run(
         now,
         now,
-        "WORKER_RETRY_EXHAUSTED",
-        safeFailureMessage("WORKER_RETRY_EXHAUSTED"),
+        failure.code,
+        failure.message,
         ...ACTIVE_STATUSES,
         maxAttempts,
       );
