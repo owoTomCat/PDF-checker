@@ -359,6 +359,62 @@ test("abort prevents new claims and stop waits for the current task", async () =
   assert.equal(harness.claimCount, 1);
 });
 
+test("fatal polling waits for an in-progress periodic cleanup before start and stop settle", async () => {
+  let releaseFirstTask!: () => void;
+  let releasePeriodicCleanup!: () => void;
+  let firstTaskStarted = false;
+  const controller = new AbortController();
+  const harness = makeTestWorker({
+    concurrency: 1,
+    queuedTaskCount: 2,
+    pollIntervalMs: 2,
+    cleanupIntervalMs: 2,
+    async cleanup() {
+      if (harness.cleanupCount !== 2) return;
+      await new Promise<void>((resolve) => {
+        releasePeriodicCleanup = resolve;
+      });
+    },
+    async processTask(task) {
+      if (task.id === "task-1") {
+        firstTaskStarted = true;
+        await new Promise<void>((resolve) => {
+          releaseFirstTask = resolve;
+        });
+        return finalResult;
+      }
+      throw new Error("audit failed");
+    },
+    async failTask(input) {
+      if (input.id === "task-2") throw new Error("repository unavailable");
+    },
+  });
+
+  let startSettled = false;
+  const started = harness.worker.start(controller.signal);
+  void started.then(
+    () => { startSettled = true; },
+    () => { startSettled = true; },
+  );
+  await waitFor(() => firstTaskStarted && harness.cleanupCount === 2);
+  releaseFirstTask();
+  await waitFor(() => harness.failures.some((failure) => failure.id === "task-2"));
+
+  let stopSettled = false;
+  const stopping = harness.worker.stop().then(() => {
+    stopSettled = true;
+  });
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  const startSettledBeforeCleanupRelease = startSettled;
+  const stopSettledBeforeCleanupRelease = stopSettled;
+
+  releasePeriodicCleanup();
+  await assert.rejects(started, /repository unavailable/);
+  await stopping;
+  assert.equal(startSettledBeforeCleanupRelease, false);
+  assert.equal(stopSettledBeforeCleanupRelease, false);
+});
+
 test("a fatal slot stops sibling claims and rejects only after claimed work settles", async () => {
   let release!: () => void;
   let siblingStarted = false;
@@ -397,6 +453,34 @@ test("a fatal slot stops sibling claims and rejects only after claimed work sett
   await assert.rejects(running, /repository unavailable/);
   assert.equal(harness.claimCount, 2);
   assert.deepEqual(harness.completedTaskIds, ["task-2"]);
+});
+
+test("a fatal rejection without a reason still stops sibling claims", async () => {
+  let release!: () => void;
+  let siblingStarted = false;
+  const harness = makeTestWorker({
+    concurrency: 2,
+    queuedTaskCount: 4,
+    async failTask(input) {
+      if (input.id === "task-1") return Promise.reject();
+    },
+    async processTask(task) {
+      if (task.id === "task-1") throw new Error("audit failed");
+      if (task.id !== "task-2") return finalResult;
+      siblingStarted = true;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return finalResult;
+    },
+  });
+
+  const running = harness.worker.runAvailable();
+  await waitFor(() => siblingStarted && harness.failures.length === 1);
+  assert.equal(harness.claimCount, 2);
+  release();
+  await assert.rejects(running, /任务执行器发生未知致命错误/);
+  assert.equal(harness.claimCount, 2);
 });
 
 test("missing and unsafe PDF paths fail without opening a file", async () => {
@@ -480,6 +564,59 @@ test("worker rejects a private-upload symlink that resolves outside storage", as
   await worker.runAvailable();
   assert.equal(opened, false);
   assert.deepEqual(failures, [{ id: "linked", errorCode: "PDF_INVALID" }]);
+});
+
+test("default PDF reader passes exact bytes to the opener and closes its handle", async (t) => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-worker-bytes-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const uploadDir = path.join(dataDir, "uploads");
+  const pdfPath = path.join(uploadDir, "stored.pdf");
+  const expected = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55, 10, 0, 255]);
+  await mkdir(uploadDir, { recursive: true });
+  await writeFile(pdfPath, expected);
+
+  let claimed = false;
+  let received: Uint8Array | undefined;
+  const worker = new TaskWorker({
+    dataDir,
+    gateway: {} as never,
+    repository: {
+      recoverInterrupted() {},
+      claimNext() {
+        if (claimed) return null;
+        claimed = true;
+        return {
+          id: "stored",
+          fileName: "stored.pdf",
+          fileSize: expected.byteLength,
+          fileType: "application/pdf",
+          pdfPath,
+        };
+      },
+      updateProgress() {},
+      complete() {},
+      fail() {},
+      findExpiredPdfTasks() { return []; },
+      markPdfDeleted() { return false; },
+      claimOrphanPdfDeletion() { return false; },
+      findPendingPdfDeletions() { return []; },
+      markPendingPdfDeleted() {},
+    },
+    openPdf: async (bytes) => {
+      received = bytes;
+      return {
+        pageCount: 1,
+        renderPage: async () => new Blob(),
+        renderRegion: async () => new Blob(),
+        destroy: async () => {},
+      };
+    },
+    runPipeline: async () => finalResult,
+  });
+
+  await worker.runAvailable();
+  assert.deepEqual(received, expected);
+  await rm(pdfPath);
 });
 
 test("worker validates the final result before completion", async () => {
@@ -588,4 +725,27 @@ test("stopped or completed workers reject later start calls without reinitializi
   );
   assert.equal(completed.recoveryCount, recoveryCount);
   assert.equal(completed.cleanupCount, cleanupCount);
+});
+
+test("stopped or completed workers reject manual drains without reinitializing", async () => {
+  const stopped = makeTestWorker({ concurrency: 1, queuedTaskCount: 0 });
+  await stopped.worker.stop();
+  await assert.rejects(stopped.worker.runAvailable(), /cannot run again/);
+  assert.equal(stopped.recoveryCount, 0);
+  assert.equal(stopped.cleanupCount, 0);
+  assert.equal(stopped.claimCount, 0);
+
+  const completed = makeTestWorker({ concurrency: 1, queuedTaskCount: 0 });
+  const controller = new AbortController();
+  const started = completed.worker.start(controller.signal);
+  await waitFor(() => completed.cleanupCount === 1);
+  controller.abort("test complete");
+  await started;
+  const recoveryCount = completed.recoveryCount;
+  const cleanupCount = completed.cleanupCount;
+  const claimCount = completed.claimCount;
+  await assert.rejects(completed.worker.runAvailable(), /cannot run again/);
+  assert.equal(completed.recoveryCount, recoveryCount);
+  assert.equal(completed.cleanupCount, cleanupCount);
+  assert.equal(completed.claimCount, claimCount);
 });

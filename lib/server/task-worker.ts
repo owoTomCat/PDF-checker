@@ -200,6 +200,12 @@ function abortableDelay(durationMs: number, signal: AbortSignal): Promise<void> 
   });
 }
 
+function asFatalWorkerError(reason: unknown): Error {
+  return reason instanceof Error
+    ? reason
+    : new Error("任务执行器发生未知致命错误。");
+}
+
 export class TaskWorker {
   private readonly repository: TaskWorkerRepository;
   private readonly dataDir: string;
@@ -218,6 +224,9 @@ export class TaskWorker {
   private initialization: Promise<void> | undefined;
   private currentRun: Promise<void> | undefined;
   private service: Promise<void> | undefined;
+  private pollLoopPromise: Promise<void> | undefined;
+  private cleanupLoopPromise: Promise<void> | undefined;
+  private serviceFatal: Error | undefined;
   private lifecycle: "new" | "running" | "stopped" | "completed" = "new";
 
   constructor(options: TaskWorkerOptions) {
@@ -251,6 +260,11 @@ export class TaskWorker {
   }
 
   runAvailable(): Promise<void> {
+    if (this.lifecycle === "stopped" || this.lifecycle === "completed") {
+      return Promise.reject(
+        new TaskWorkerConfigurationError("A worker cannot run again."),
+      );
+    }
     if (this.currentRun) return this.currentRun;
     const running = this.runAvailableInternal();
     this.currentRun = running;
@@ -278,7 +292,17 @@ export class TaskWorker {
       try {
         await this.ensureInitialized();
         if (this.controller.signal.aborted) return;
-        await Promise.all([this.pollLoop(), this.cleanupLoop()]);
+        this.pollLoopPromise = this.observeLoop(this.pollLoop());
+        this.cleanupLoopPromise = this.observeLoop(this.cleanupLoop());
+        const results = await Promise.allSettled([
+          this.pollLoopPromise,
+          this.cleanupLoopPromise,
+        ]);
+        if (this.serviceFatal) throw this.serviceFatal;
+        const failure = results.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (failure) throw asFatalWorkerError(failure.reason);
       } finally {
         signal.removeEventListener("abort", forwardAbort);
         if (this.lifecycle === "running") this.lifecycle = "completed";
@@ -295,6 +319,8 @@ export class TaskWorker {
     this.controller.abort("worker stopped");
     await Promise.allSettled([
       ...(this.service ? [this.service] : []),
+      ...(this.pollLoopPromise ? [this.pollLoopPromise] : []),
+      ...(this.cleanupLoopPromise ? [this.cleanupLoopPromise] : []),
       ...this.activeRuns,
     ]);
   }
@@ -326,28 +352,35 @@ export class TaskWorker {
   private async runAvailableInternal(): Promise<void> {
     await this.ensureInitialized();
     if (this.controller.signal.aborted) return;
-    const state: { fatalError: unknown | undefined } = {
+    const state: { hasFatal: boolean; fatalError: Error | undefined } = {
+      hasFatal: false,
       fatalError: undefined,
     };
     const results = await Promise.allSettled(
       Array.from({ length: this.concurrency }, () => this.runSlot(state)),
     );
-    if (state.fatalError !== undefined) throw state.fatalError;
+    if (state.hasFatal) throw state.fatalError!;
     const failure = results.find((result): result is PromiseRejectedResult =>
       result.status === "rejected",
     );
-    if (failure) throw failure.reason;
+    if (failure) throw asFatalWorkerError(failure.reason);
   }
 
-  private async runSlot(state: { fatalError: unknown | undefined }): Promise<void> {
+  private async runSlot(state: {
+    hasFatal: boolean;
+    fatalError: Error | undefined;
+  }): Promise<void> {
     try {
-      while (!this.controller.signal.aborted && state.fatalError === undefined) {
+      while (!this.controller.signal.aborted && !state.hasFatal) {
         const task = this.repository.claimNext(this.now());
         if (task === null) return;
         await this.processTask(task);
       }
     } catch (error) {
-      state.fatalError ??= error;
+      if (!state.hasFatal) {
+        state.hasFatal = true;
+        state.fatalError = asFatalWorkerError(error);
+      }
     }
   }
 
@@ -420,6 +453,7 @@ export class TaskWorker {
 
   private async pollLoop(): Promise<void> {
     while (!this.controller.signal.aborted) {
+      if (this.controller.signal.aborted) return;
       await this.runAvailable();
       if (this.controller.signal.aborted) return;
       await abortableDelay(this.pollIntervalMs, this.controller.signal);
@@ -432,6 +466,22 @@ export class TaskWorker {
       if (this.controller.signal.aborted) return;
       await this.runCleanup();
     }
+  }
+
+  private async observeLoop(loop: Promise<void>): Promise<void> {
+    try {
+      await loop;
+    } catch (error) {
+      throw this.recordServiceFatal(error);
+    }
+  }
+
+  private recordServiceFatal(reason: unknown): Error {
+    this.serviceFatal ??= asFatalWorkerError(reason);
+    if (!this.controller.signal.aborted) {
+      this.controller.abort(this.serviceFatal);
+    }
+    return this.serviceFatal;
   }
 }
 
