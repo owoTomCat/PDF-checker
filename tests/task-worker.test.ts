@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,7 +10,9 @@ import { ServerPdfError } from "../lib/server/pdf-renderer";
 import {
   TASK_FILE_CLEANUP_INTERVAL_MS,
   TaskWorker,
+  createTaskWorkerFromEnv,
   parseTaskWorkerConcurrency,
+  parseTaskWorkerPollInterval,
 } from "../lib/server/task-worker";
 import { strictFinalizeRequest } from "./strict-fixtures";
 
@@ -52,6 +55,7 @@ function makeTestWorker(options: {
   cleanup?: () => Promise<void>;
   cleanupIntervalMs?: number;
   pollIntervalMs?: number;
+  useDefaultPdfReader?: boolean;
   logger?: { error: (message: string, context: Record<string, unknown>) => void };
   failTask?: (input: { id: string; errorCode: string }) => Promise<void> | void;
 }) {
@@ -122,8 +126,14 @@ function makeTestWorker(options: {
       events.push("cleanup");
       await options.cleanup?.();
     },
-    openPdf: async (pdfPath: string) => {
-      const taskId = path.basename(pdfPath, ".pdf");
+    ...(options.useDefaultPdfReader
+      ? {}
+      : {
+          readPdfBytes: async (pdfPath: string) =>
+            new TextEncoder().encode(path.basename(pdfPath, ".pdf")),
+        }),
+    openPdf: async (bytes: Uint8Array) => {
+      const taskId = new TextDecoder().decode(bytes);
       return {
         pageCount: 1,
         async renderPage() {
@@ -298,6 +308,27 @@ test("worker concurrency defaults to three and accepts only integers from one to
   }
 });
 
+test("worker poll interval defaults to one second and rejects unsafe values", () => {
+  assert.equal(parseTaskWorkerPollInterval(undefined), 1_000);
+  assert.equal(parseTaskWorkerPollInterval("250"), 250);
+  for (const value of ["99", "60001", "2.5", "", "many"]) {
+    assert.throws(
+      () => parseTaskWorkerPollInterval(value),
+      /integer from 100 through 60000/,
+    );
+  }
+});
+
+test("worker environment rejects an invalid poll interval before startup", () => {
+  assert.throws(
+    () => createTaskWorkerFromEnv({} as never, {
+      PDF_AUDIT_DATA_DIR: path.join(os.tmpdir(), "pdf-checker-worker-env"),
+      PDF_AUDIT_WORKER_POLL_MS: "99",
+    } as unknown as NodeJS.ProcessEnv),
+    /PDF_AUDIT_WORKER_POLL_MS must be an integer from 100 through 60000/,
+  );
+});
+
 test("abort prevents new claims and stop waits for the current task", async () => {
   let release!: () => void;
   let started = false;
@@ -328,17 +359,18 @@ test("abort prevents new claims and stop waits for the current task", async () =
   assert.equal(harness.claimCount, 1);
 });
 
-test("runAvailable waits for sibling slots before reporting a repository failure", async () => {
+test("a fatal slot stops sibling claims and rejects only after claimed work settles", async () => {
   let release!: () => void;
   let siblingStarted = false;
   const harness = makeTestWorker({
     concurrency: 2,
-    queuedTaskCount: 2,
+    queuedTaskCount: 4,
     async failTask(input) {
       if (input.id === "task-1") throw new Error("repository unavailable");
     },
     async processTask(task) {
       if (task.id === "task-1") throw new Error("audit failed");
+      if (task.id !== "task-2") return finalResult;
       siblingStarted = true;
       await new Promise<void>((resolve) => {
         release = resolve;
@@ -360,8 +392,10 @@ test("runAvailable waits for sibling slots before reporting a repository failure
   await waitFor(() => siblingStarted && harness.failures.length === 1);
   await new Promise<void>((resolve) => setTimeout(resolve, 5));
   assert.equal(settled, false);
+  assert.equal(harness.claimCount, 2);
   release();
   await assert.rejects(running, /repository unavailable/);
+  assert.equal(harness.claimCount, 2);
   assert.deepEqual(harness.completedTaskIds, ["task-2"]);
 });
 
@@ -369,6 +403,7 @@ test("missing and unsafe PDF paths fail without opening a file", async () => {
   const outside = path.join(os.tmpdir(), "not-private.pdf");
   const harness = makeTestWorker({
     concurrency: 1,
+    useDefaultPdfReader: true,
     tasks: [
       { id: "missing", fileName: "missing.pdf", fileSize: 1, fileType: "application/pdf", pdfPath: null },
       { id: "unsafe", fileName: "unsafe.pdf", fileSize: 1, fileType: "application/pdf", pdfPath: outside },
@@ -381,6 +416,70 @@ test("missing and unsafe PDF paths fail without opening a file", async () => {
     { id: "unsafe", errorCode: "PDF_INVALID" },
   ]);
   assert.deepEqual(harness.completedTaskIds, []);
+});
+
+test("worker rejects a private-upload symlink that resolves outside storage", async (t) => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-worker-symlink-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const uploadDir = path.join(dataDir, "uploads");
+  const outsidePdf = path.join(dataDir, "outside.pdf");
+  const linkedPdf = path.join(uploadDir, "linked.pdf");
+  await mkdir(uploadDir, { recursive: true });
+  await writeFile(outsidePdf, "%PDF-1.7");
+  try {
+    await symlink(outsidePdf, linkedPdf, "file");
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "EPERM") {
+      t.skip("Creating test symlinks requires Windows developer privileges.");
+      return;
+    }
+    throw error;
+  }
+
+  const failures: Array<{ id: string; errorCode: string }> = [];
+  let opened = false;
+  const worker = new TaskWorker({
+    dataDir,
+    gateway: {} as never,
+    repository: {
+      recoverInterrupted() {},
+      claimNext() {
+        const task = failures.length === 0
+          ? {
+              id: "linked",
+              fileName: "linked.pdf",
+              fileSize: 8,
+              fileType: "application/pdf",
+              pdfPath: linkedPdf,
+            }
+          : null;
+        return task;
+      },
+      updateProgress() {},
+      complete() {},
+      fail(input) {
+        failures.push({ id: input.id, errorCode: input.errorCode });
+      },
+      findExpiredPdfTasks() { return []; },
+      markPdfDeleted() { return false; },
+      claimOrphanPdfDeletion() { return false; },
+      findPendingPdfDeletions() { return []; },
+      markPendingPdfDeleted() {},
+    },
+    openPdf: async () => {
+      opened = true;
+      return {
+        pageCount: 1,
+        renderPage: async () => new Blob(),
+        renderRegion: async () => new Blob(),
+        destroy: async () => {},
+      };
+    },
+  });
+
+  await worker.runAvailable();
+  assert.equal(opened, false);
+  assert.deepEqual(failures, [{ id: "linked", errorCode: "PDF_INVALID" }]);
 });
 
 test("worker validates the final result before completion", async () => {
@@ -442,4 +541,51 @@ test("worker logs diagnostics without paths or untrusted payloads", async () => 
   assert.match(serialized, /task-1/);
   assert.match(serialized, /INTERNAL_ERROR/);
   assert.doesNotMatch(serialized, /private|data:image|SECRET|raw model response/i);
+});
+
+test("worker persists a failed task even when diagnostics logging throws", async () => {
+  const harness = makeTestWorker({
+    concurrency: 1,
+    queuedTaskCount: 1,
+    logger: {
+      error() {
+        throw new Error("logger unavailable");
+      },
+    },
+    async processTask() {
+      throw new Error("audit failed");
+    },
+  });
+
+  await harness.worker.runAvailable();
+  assert.deepEqual(harness.failures, [
+    { id: "task-1", errorCode: "INTERNAL_ERROR" },
+  ]);
+});
+
+test("stopped or completed workers reject later start calls without reinitializing", async () => {
+  const stopped = makeTestWorker({ concurrency: 1, queuedTaskCount: 0 });
+  await stopped.worker.stop();
+  await assert.rejects(
+    stopped.worker.start(new AbortController().signal),
+    /cannot be started again/,
+  );
+  assert.equal(stopped.recoveryCount, 0);
+  assert.equal(stopped.cleanupCount, 0);
+  assert.equal(stopped.claimCount, 0);
+
+  const completed = makeTestWorker({ concurrency: 1, queuedTaskCount: 0 });
+  const controller = new AbortController();
+  const firstStart = completed.worker.start(controller.signal);
+  await waitFor(() => completed.cleanupCount === 1);
+  controller.abort("test complete");
+  await firstStart;
+  const recoveryCount = completed.recoveryCount;
+  const cleanupCount = completed.cleanupCount;
+  await assert.rejects(
+    completed.worker.start(new AbortController().signal),
+    /cannot be started again/,
+  );
+  assert.equal(completed.recoveryCount, recoveryCount);
+  assert.equal(completed.cleanupCount, cleanupCount);
 });

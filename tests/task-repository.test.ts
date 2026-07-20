@@ -5,7 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { buildFinalAuditResult } from "../lib/audit-result";
 import { openTaskDatabase } from "../lib/server/task-database";
-import { TaskRepository, type FailTaskInput } from "../lib/server/task-repository";
+import {
+  MAX_TASK_ATTEMPTS,
+  TaskRepository,
+  type FailTaskInput,
+} from "../lib/server/task-repository";
 import { strictFinalizeRequest } from "./strict-fixtures";
 
 test("repository isolates owners and atomically claims oldest queued work", async (t) => {
@@ -43,6 +47,7 @@ test("repository isolates owners and atomically claims oldest queued work", asyn
 });
 
 test("restart recovery requeues twice and fails the third interrupted claim", async (t) => {
+  assert.equal(MAX_TASK_ATTEMPTS, 3);
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-recovery-"));
   const db = openTaskDatabase(root);
   t.after(() => db.close());
@@ -59,9 +64,9 @@ test("restart recovery requeues twice and fails the third interrupted claim", as
     now: "2026-07-20T00:00:00.000Z",
   });
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt += 1) {
     repository.claimNext(`2026-07-20T00:0${attempt}:00.000Z`);
-    repository.recoverInterrupted(`2026-07-20T00:0${attempt}:30.000Z`, 3);
+    repository.recoverInterrupted(`2026-07-20T00:0${attempt}:30.000Z`);
   }
   const task = repository.getOwned("a@example.com", "retry-me");
   assert.equal(task?.status, "failed");

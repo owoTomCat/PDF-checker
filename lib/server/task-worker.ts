@@ -1,3 +1,5 @@
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { StrictFinalAuditResponseSchema } from "../ai/contracts";
 import type { AuditStageGateway, RenderedPdfDocument } from "../audit/gateway";
@@ -27,7 +29,6 @@ import type { TaskRepository } from "./task-repository";
 
 export const TASK_FILE_CLEANUP_INTERVAL_MS = 15 * 60 * 1_000;
 const DEFAULT_QUEUE_POLL_INTERVAL_MS = 1_000;
-const MAX_TASK_ATTEMPTS = 3;
 
 type Awaitable<T> = T | Promise<T>;
 type ClaimedTask = Pick<
@@ -36,7 +37,7 @@ type ClaimedTask = Pick<
 >;
 
 export type TaskWorkerRepository = CleanupRepository & {
-  recoverInterrupted: (now: string, maxAttempts: number) => void;
+  recoverInterrupted: (now: string) => void;
   claimNext: (now: string) => ClaimedTask | null;
   updateProgress: (input: UpdateProgressInput) => Awaitable<unknown>;
   complete: (input: CompleteTaskInput) => Awaitable<unknown>;
@@ -48,7 +49,8 @@ type WorkerLogger = {
 };
 
 type RunPipeline = typeof runAuditPipeline;
-type OpenPdf = (pdfPath: string) => Promise<RenderedPdfDocument>;
+type OpenPdf = (bytes: Uint8Array) => Promise<RenderedPdfDocument>;
+type ReadPdfBytes = (pdfPath: string, dataDir: string) => Promise<Uint8Array>;
 
 export type TaskWorkerOptions = {
   repository: TaskWorkerRepository;
@@ -56,9 +58,9 @@ export type TaskWorkerOptions = {
   concurrency?: number;
   pollIntervalMs?: number;
   cleanupIntervalMs?: number;
-  maxAttempts?: number;
   gateway: AuditStageGateway;
   openPdf?: OpenPdf;
+  readPdfBytes?: ReadPdfBytes;
   runPipeline?: RunPipeline;
   cleanup?: () => Promise<unknown>;
   now?: () => string;
@@ -92,6 +94,19 @@ export function parseTaskWorkerConcurrency(
   return parsed;
 }
 
+export function parseTaskWorkerPollInterval(
+  value: string | number | undefined,
+): number {
+  if (value === undefined) return DEFAULT_QUEUE_POLL_INTERVAL_MS;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < 100 || parsed > 60_000) {
+    throw new TaskWorkerConfigurationError(
+      "PDF_AUDIT_WORKER_POLL_MS must be an integer from 100 through 60000.",
+    );
+  }
+  return parsed;
+}
+
 export function requireDataDir(env: NodeJS.ProcessEnv): string {
   const dataDir = env.PDF_AUDIT_DATA_DIR?.trim();
   if (!dataDir) {
@@ -100,14 +115,53 @@ export function requireDataDir(env: NodeJS.ProcessEnv): string {
   return dataDir;
 }
 
-function isPrivatePdfPath(pdfPath: string, dataDir: string): boolean {
-  const uploadDir = resolveTaskDataPaths(dataDir).uploadDir;
-  const relative = path.relative(path.resolve(uploadDir), path.resolve(pdfPath));
+function isChildPath(candidate: string, parent: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
   return (
     relative.length > 0 &&
     !relative.startsWith("..") &&
     !path.isAbsolute(relative)
   );
+}
+
+async function readPrivateTaskPdf(
+  pdfPath: string,
+  dataDir: string,
+): Promise<Uint8Array> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const uploadDir = resolveTaskDataPaths(dataDir).uploadDir;
+    const [uploadRealPath, details] = await Promise.all([
+      realpath(uploadDir),
+      lstat(pdfPath),
+    ]);
+    if (!details.isFile() || details.isSymbolicLink()) {
+      throw new TaskProcessingError("PDF_INVALID");
+    }
+
+    const pdfRealPath = await realpath(pdfPath);
+    if (!isChildPath(pdfRealPath, uploadRealPath)) {
+      throw new TaskProcessingError("PDF_INVALID");
+    }
+
+    const noFollow =
+      typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    handle = await open(pdfRealPath, fsConstants.O_RDONLY | noFollow);
+    const openedDetails = await handle.stat();
+    if (
+      !openedDetails.isFile() ||
+      openedDetails.dev !== details.dev ||
+      openedDetails.ino !== details.ino
+    ) {
+      throw new TaskProcessingError("PDF_INVALID");
+    }
+    return new Uint8Array(await handle.readFile());
+  } catch (error) {
+    if (error instanceof TaskProcessingError) throw error;
+    throw new TaskProcessingError("PDF_INVALID");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 function normalizeWorkerFailure(error: unknown): TaskFailureCode {
@@ -152,9 +206,9 @@ export class TaskWorker {
   private readonly concurrency: number;
   private readonly pollIntervalMs: number;
   private readonly cleanupIntervalMs: number;
-  private readonly maxAttempts: number;
   private readonly gateway: AuditStageGateway;
   private readonly openPdf: OpenPdf;
+  private readonly readPdfBytes: ReadPdfBytes;
   private readonly runPipeline: RunPipeline;
   private readonly cleanup: () => Promise<unknown>;
   private readonly now: () => string;
@@ -164,6 +218,7 @@ export class TaskWorker {
   private initialization: Promise<void> | undefined;
   private currentRun: Promise<void> | undefined;
   private service: Promise<void> | undefined;
+  private lifecycle: "new" | "running" | "stopped" | "completed" = "new";
 
   constructor(options: TaskWorkerOptions) {
     this.repository = options.repository;
@@ -172,9 +227,9 @@ export class TaskWorker {
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_QUEUE_POLL_INTERVAL_MS;
     this.cleanupIntervalMs =
       options.cleanupIntervalMs ?? TASK_FILE_CLEANUP_INTERVAL_MS;
-    this.maxAttempts = options.maxAttempts ?? MAX_TASK_ATTEMPTS;
     this.gateway = options.gateway;
     this.openPdf = options.openPdf ?? openServerPdf;
+    this.readPdfBytes = options.readPdfBytes ?? readPrivateTaskPdf;
     this.runPipeline = options.runPipeline ?? runAuditPipeline;
     this.cleanup =
       options.cleanup ??
@@ -208,7 +263,13 @@ export class TaskWorker {
   }
 
   start(signal: AbortSignal): Promise<void> {
-    if (this.service) return this.service;
+    if (this.lifecycle === "running" && this.service) return this.service;
+    if (this.lifecycle !== "new") {
+      return Promise.reject(
+        new TaskWorkerConfigurationError("A worker cannot be started again."),
+      );
+    }
+    this.lifecycle = "running";
     const forwardAbort = () => this.controller.abort(signal.reason);
     if (signal.aborted) forwardAbort();
     else signal.addEventListener("abort", forwardAbort, { once: true });
@@ -220,6 +281,7 @@ export class TaskWorker {
         await Promise.all([this.pollLoop(), this.cleanupLoop()]);
       } finally {
         signal.removeEventListener("abort", forwardAbort);
+        if (this.lifecycle === "running") this.lifecycle = "completed";
       }
     })();
     this.service = service;
@@ -227,6 +289,9 @@ export class TaskWorker {
   }
 
   async stop(): Promise<void> {
+    if (this.lifecycle === "new" || this.lifecycle === "running") {
+      this.lifecycle = "stopped";
+    }
     this.controller.abort("worker stopped");
     await Promise.allSettled([
       ...(this.service ? [this.service] : []),
@@ -236,7 +301,7 @@ export class TaskWorker {
 
   private async ensureInitialized(): Promise<void> {
     this.initialization ??= (async () => {
-      this.repository.recoverInterrupted(this.now(), this.maxAttempts);
+      this.repository.recoverInterrupted(this.now());
       await this.runCleanup();
     })();
     await this.initialization;
@@ -251,7 +316,7 @@ export class TaskWorker {
     try {
       await this.cleanup();
     } catch {
-      this.logger.error("Audit worker cleanup failed.", {
+      this.logError("Audit worker cleanup failed.", {
         stage: "cleanup",
         code: "INTERNAL_ERROR",
       });
@@ -261,20 +326,28 @@ export class TaskWorker {
   private async runAvailableInternal(): Promise<void> {
     await this.ensureInitialized();
     if (this.controller.signal.aborted) return;
+    const state: { fatalError: unknown | undefined } = {
+      fatalError: undefined,
+    };
     const results = await Promise.allSettled(
-      Array.from({ length: this.concurrency }, () => this.runSlot()),
+      Array.from({ length: this.concurrency }, () => this.runSlot(state)),
     );
-    const failure = results.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
+    if (state.fatalError !== undefined) throw state.fatalError;
+    const failure = results.find((result): result is PromiseRejectedResult =>
+      result.status === "rejected",
     );
     if (failure) throw failure.reason;
   }
 
-  private async runSlot(): Promise<void> {
-    while (!this.controller.signal.aborted) {
-      const task = this.repository.claimNext(this.now());
-      if (task === null) return;
-      await this.processTask(task);
+  private async runSlot(state: { fatalError: unknown | undefined }): Promise<void> {
+    try {
+      while (!this.controller.signal.aborted && state.fatalError === undefined) {
+        const task = this.repository.claimNext(this.now());
+        if (task === null) return;
+        await this.processTask(task);
+      }
+    } catch (error) {
+      state.fatalError ??= error;
     }
   }
 
@@ -282,10 +355,11 @@ export class TaskWorker {
     let pdf: RenderedPdfDocument | undefined;
     let stage = "opening_pdf";
     try {
-      if (task.pdfPath === null || !isPrivatePdfPath(task.pdfPath, this.dataDir)) {
+      if (task.pdfPath === null) {
         throw new TaskProcessingError("PDF_INVALID");
       }
-      pdf = await this.openPdf(task.pdfPath);
+      const bytes = await this.readPdfBytes(task.pdfPath, this.dataDir);
+      pdf = await this.openPdf(bytes);
       const result = await this.runPipeline({
         fileName: task.fileName,
         fileSize: task.fileSize,
@@ -316,16 +390,31 @@ export class TaskWorker {
       });
     } catch (error) {
       const code = normalizeWorkerFailure(error);
-      this.logger.error("Audit task failed.", { taskId: task.id, stage, code });
-      await this.repository.fail({ id: task.id, errorCode: code, now: this.now() });
+      try {
+        await this.repository.fail({
+          id: task.id,
+          errorCode: code,
+          now: this.now(),
+        });
+      } finally {
+        this.logError("Audit task failed.", { taskId: task.id, stage, code });
+      }
     } finally {
       await pdf?.destroy().catch(() => {
-        this.logger.error("Audit PDF cleanup failed.", {
+        this.logError("Audit PDF cleanup failed.", {
           taskId: task.id,
           stage: "pdf_cleanup",
           code: "PDF_RENDER_FAILED",
         });
       });
+    }
+  }
+
+  private logError(message: string, context: Record<string, unknown>): void {
+    try {
+      this.logger.error(message, context);
+    } catch {
+      // Diagnostic sinks must never change the durable task result.
     }
   }
 
@@ -354,6 +443,9 @@ export function createTaskWorkerFromEnv(
   const concurrency = parseTaskWorkerConcurrency(
     env.PDF_AUDIT_WORKER_CONCURRENCY,
   );
+  const pollIntervalMs = parseTaskWorkerPollInterval(
+    env.PDF_AUDIT_WORKER_POLL_MS,
+  );
   const client = createBailianClient({
     apiKey: env.DASHSCOPE_API_KEY ?? "",
     baseUrl: env.DASHSCOPE_BASE_URL ?? "",
@@ -363,6 +455,7 @@ export function createTaskWorkerFromEnv(
     repository,
     dataDir,
     concurrency,
+    pollIntervalMs,
     gateway: createBailianAuditGateway(client),
   });
 }

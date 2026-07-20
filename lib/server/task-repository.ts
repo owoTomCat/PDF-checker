@@ -49,6 +49,8 @@ const ACTIVE_STATUSES = [
   "finalizing",
 ] as const;
 
+export const MAX_TASK_ATTEMPTS = 3;
+
 export type WorkerTask = AuditTaskDetail & {
   ownerEmail: string;
   pdfPath: string | null;
@@ -277,10 +279,10 @@ export class TaskRepository {
     try {
       const row = this.db.prepare(`
         SELECT * FROM audit_tasks
-        WHERE status = 'queued' AND attempt_count < 3
+      WHERE status = 'queued' AND attempt_count < ?
         ORDER BY created_at ASC, id ASC
         LIMIT 1
-      `).get() as TaskRow | undefined;
+      `).get(MAX_TASK_ATTEMPTS) as TaskRow | undefined;
       if (!row) {
         this.db.exec("COMMIT");
         return null;
@@ -362,7 +364,7 @@ export class TaskRepository {
     return mapTaskDetail(row);
   }
 
-  recoverInterrupted(now: string, maxAttempts: number): void {
+  recoverInterrupted(now: string): void {
     const activeStatuses = ACTIVE_STATUSES.map(() => "?").join(", ");
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -372,7 +374,7 @@ export class TaskRepository {
         SET status = 'queued', progress = 0, processed_pages = 0,
             updated_at = ?, completed_at = NULL, error_code = NULL, error_message = NULL
         WHERE status IN (${activeStatuses}) AND attempt_count < ?
-      `).run(now, ...ACTIVE_STATUSES, maxAttempts);
+      `).run(now, ...ACTIVE_STATUSES, MAX_TASK_ATTEMPTS);
       this.db.prepare(`
         UPDATE audit_tasks
         SET status = 'failed', updated_at = ?, completed_at = ?,
@@ -384,7 +386,7 @@ export class TaskRepository {
         failure.code,
         failure.message,
         ...ACTIVE_STATUSES,
-        maxAttempts,
+        MAX_TASK_ATTEMPTS,
       );
       this.db.exec("COMMIT");
     } catch (error) {

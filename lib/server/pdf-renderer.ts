@@ -166,12 +166,14 @@ const defaultRuntime: ServerPdfRuntime = {
 
 export function createServerPdfOpener(runtime: ServerPdfRuntime) {
   return async function openServerPdfWithRuntime(
-    pdfPath: string,
+    source: string | Uint8Array,
   ): Promise<RenderedPdfDocument> {
     let loadingTask: ServerPdfLoadingTask | undefined;
 
     try {
-      const bytes = await runtime.readFile(pdfPath);
+      const bytes = typeof source === "string"
+        ? await runtime.readFile(source)
+        : source;
       loadingTask = runtime.getDocument(bytes);
       const activeLoadingTask = loadingTask;
       const document = await activeLoadingTask.promise;
