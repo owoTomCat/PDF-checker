@@ -270,3 +270,51 @@ test("orphan deletion claims arbitrate atomically with task creation", async (t)
   }), /PDF storage is unavailable/);
   assert.equal(repository.getOwned("a@example.com", "claim-wins"), null);
 });
+
+test("orphan claim pruning reclaims only stale unreferenced leases", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-orphan-lease-"));
+  const db = openTaskDatabase(root);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = new TaskRepository(db);
+  const activePath = path.join(root, "uploads", "active-claim.pdf");
+  const stalePath = path.join(root, "uploads", "stale-claim.pdf");
+  const referencedPath = path.join(root, "uploads", "referenced.pdf");
+
+  assert.equal(repository.claimOrphanPdfDeletion(activePath, "2026-07-20T00:20:00.000Z"), true);
+  assert.equal(repository.claimOrphanPdfDeletion(stalePath, "2026-07-20T00:00:00.000Z"), true);
+  repository.create({
+    id: "referenced-task",
+    ownerEmail: "a@example.com",
+    fileName: "referenced.pdf",
+    fileSize: 10,
+    fileType: "application/pdf",
+    pdfPath: referencedPath,
+    pdfExpiresAt: "2026-07-23T00:00:00.000Z",
+    now: "2026-07-20T00:00:00.000Z",
+  });
+  db.prepare(
+    "INSERT INTO pdf_orphan_deletion_claims (pdf_path, claimed_at) VALUES (?, ?)",
+  ).run(referencedPath, "2026-07-20T00:00:00.000Z");
+
+  assert.equal(
+    repository.pruneStaleOrphanPdfDeletionClaims("2026-07-20T00:10:00.000Z"),
+    1,
+  );
+  assert.equal(repository.claimOrphanPdfDeletion(stalePath, "2026-07-20T00:21:00.000Z"), true);
+  assert.equal(repository.claimOrphanPdfDeletion(activePath, "2026-07-20T00:21:00.000Z"), false);
+  assert.throws(() => repository.create({
+    id: "active-claim-task",
+    ownerEmail: "a@example.com",
+    fileName: "active.pdf",
+    fileSize: 10,
+    fileType: "application/pdf",
+    pdfPath: activePath,
+    pdfExpiresAt: "2026-07-23T00:00:00.000Z",
+    now: "2026-07-20T00:21:00.000Z",
+  }), /PDF storage is unavailable/);
+  const referencedClaim = db.prepare(
+    "SELECT COUNT(*) AS count FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
+  ).get(referencedPath) as { count: number };
+  assert.equal(referencedClaim.count, 1);
+});

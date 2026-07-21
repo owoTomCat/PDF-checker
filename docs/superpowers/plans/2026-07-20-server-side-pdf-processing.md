@@ -1453,6 +1453,31 @@ readlink -f /opt/pdf-checker/current
 
 Expected: unit and Nginx verification pass, all services are active, SQLite exists, local HTTP succeeds, and `current` resolves to the published commit. If this is the first release migration from a real `/opt/pdf-checker/current` directory, retain the generated `.current.pre-symlink.*` rollback directory until every health check passes. On a failed activation, restore that directory before restarting services; on a later symlink-to-symlink rollout, reactivate the previously verified commit with the same script.
 
+For the exceptional first-directory migration rollback, use the exact guarded sequence below. It
+must stop the worker before the web service, prove `current` is a symlink, select exactly one real
+backup directory, and remove only that symlink before restoring the directory with `mv -T`.
+
+```bash
+set -euo pipefail
+sudo systemctl stop pdf-checker-worker.service
+sudo systemctl stop pdf-checker.service
+current=/opt/pdf-checker/current
+test -L "$current"
+mapfile -t rollback_dirs < <(sudo find /opt/pdf-checker -mindepth 1 -maxdepth 1 -type d -name '.current.pre-symlink.*' -print)
+test "${#rollback_dirs[@]}" -eq 1
+backup="${rollback_dirs[0]}"
+sudo test -d "$backup"
+sudo rm -f -- "$current"
+sudo test ! -e "$current"
+sudo mv -T -- "$backup" "$current"
+sudo test -d "$current"
+sudo test ! -L "$current"
+sudo systemctl restart pdf-checker.service
+sudo systemctl restart pdf-checker-worker.service
+curl -fsS http://127.0.0.1:3000/ >/dev/null
+sudo systemctl is-active pdf-checker.service pdf-checker-worker.service
+```
+
 - [ ] **Step 7: Run the deployed browser acceptance flow**
 
 From `http://[2402:4e00:1420:900:3c84:524:bcf4:0]/`:

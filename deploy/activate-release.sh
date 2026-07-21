@@ -24,7 +24,11 @@ release="$releases/$commit"
 [[ -d "$release" && ! -L "$release" ]] || die "target release must be a real directory"
 release="$(cd -- "$release" && pwd -P)"
 [[ "$(dirname -- "$release")" == "$releases" ]] || die "target release is outside the releases directory"
-[[ -f "$release/package.json" && -f "$release/dist/audit-worker.mjs" ]] || die "target release is missing required build artifacts"
+[[ -f "$release/package.json" \
+  && -f "$release/dist/audit-worker.mjs" \
+  && -f "$release/dist/server/index.js" \
+  && -f "$release/dist/server/vinext-server.json" ]] \
+  || die "target release is missing required build artifacts"
 
 current="$root/current"
 tmp="$root/.current.next.$$"

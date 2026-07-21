@@ -60,8 +60,11 @@ async function createBashSymlink(target, link) {
 
 async function makeRelease(root, id) {
   const release = path.join(root, "releases", id);
+  await mkdir(path.join(release, "dist", "server"), { recursive: true });
   await writeFile(path.join(release, "package.json"), "{}", { encoding: "utf8", flag: "wx" });
   await writeFile(path.join(release, "dist", "audit-worker.mjs"), "export {};", { encoding: "utf8", flag: "wx" });
+  await writeFile(path.join(release, "dist", "server", "index.js"), "export {};", { encoding: "utf8", flag: "wx" });
+  await writeFile(path.join(release, "dist", "server", "vinext-server.json"), "{}", { encoding: "utf8", flag: "wx" });
   return release;
 }
 
@@ -123,6 +126,35 @@ test("activation atomically replaces an existing current symlink without creatin
   assert.equal(await bashRealpath(current), await bashRealpath(path.join(root, "releases", commit)));
   const names = await readdir(root);
   assert.equal(names.some((name) => name.startsWith(".current.pre-symlink.")), false);
+});
+
+test("activation creates current when no prior current path exists", async (t) => {
+  const root = await createActivationRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = path.join(root, "current");
+
+  const result = await activate(root);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await isBashSymlink(current), true);
+  assert.equal(await bashRealpath(current), await bashRealpath(path.join(root, "releases", commit)));
+  const names = await readdir(root);
+  assert.equal(names.some((name) => name.startsWith(".current.pre-symlink.")), false);
+  assert.equal(names.some((name) => name.startsWith(".current.next.")), false);
+});
+
+test("activation rejects a release missing a required web artifact without changing current", async (t) => {
+  const root = await createActivationRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = path.join(root, "current");
+  await createBashSymlink(path.join(root, "releases", previousCommit), current);
+  await rm(path.join(root, "releases", commit, "dist", "server", "index.js"));
+
+  const result = await activate(root);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(await isBashSymlink(current), true);
+  assert.equal(await bashRealpath(current), await bashRealpath(path.join(root, "releases", previousCommit)));
 });
 
 test("activation cleans up its temporary link when preserving the old directory fails", async (t) => {

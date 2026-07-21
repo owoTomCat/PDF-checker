@@ -15,6 +15,7 @@ import { MAX_PDF_BYTES } from "../ai/contracts";
 const PDF_MAGIC = new TextEncoder().encode("%PDF-");
 const UPLOAD_SUFFIX = ".uploading";
 const ONE_HOUR_MS = 60 * 60 * 1_000;
+export const ORPHAN_CLAIM_LEASE_MS = 30 * 60 * 1_000;
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class TaskFileError extends Error {
@@ -34,6 +35,7 @@ export type CleanupRepository = {
   markPdfDeleted: (id: string, now: string) => boolean;
   claimOrphanPdfDeletion: (pdfPath: string, now: string) => boolean;
   releaseOrphanPdfDeletionClaim: (pdfPath: string) => void;
+  pruneStaleOrphanPdfDeletionClaims: (staleBefore: string) => number;
   findPendingPdfDeletions: () => string[];
   markPendingPdfDeleted: (pdfPath: string) => void;
 };
@@ -241,6 +243,13 @@ export async function cleanupTaskFiles(input: {
 }): Promise<CleanupResult> {
   const operations = input.fileOperations ?? defaultTaskFileOperations;
   const { uploadDir } = resolveTaskDataPaths(input.dataDir);
+  const nowMs = Date.parse(input.now);
+  if (!Number.isFinite(nowMs)) {
+    throw new TaskFileError("INVALID_CLEANUP_TIME", "PDF cleanup time is invalid.");
+  }
+  input.repository.pruneStaleOrphanPdfDeletionClaims(
+    new Date(nowMs - ORPHAN_CLAIM_LEASE_MS).toISOString(),
+  );
   let deletedTaskPdfs = 0;
   let deletedPendingPdfs = 0;
   for (const pdfPath of input.repository.findPendingPdfDeletions()) {

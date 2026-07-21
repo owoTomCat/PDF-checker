@@ -192,6 +192,10 @@ function changedRows(result: { changes: number | bigint }): boolean {
     : result.changes !== 0;
 }
 
+function changedRowCount(result: { changes: number | bigint }): number {
+  return typeof result.changes === "bigint" ? Number(result.changes) : result.changes;
+}
+
 export class TaskRepository {
   constructor(private readonly db: DatabaseSync) {}
 
@@ -548,6 +552,17 @@ export class TaskRepository {
     this.db.prepare(
       "DELETE FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
     ).run(pdfPath);
+  }
+
+  pruneStaleOrphanPdfDeletionClaims(staleBefore: string): number {
+    return changedRowCount(this.db.prepare(`
+      DELETE FROM pdf_orphan_deletion_claims
+      WHERE claimed_at <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM audit_tasks
+          WHERE audit_tasks.pdf_path = pdf_orphan_deletion_claims.pdf_path
+        )
+    `).run(staleBefore));
   }
 }
 

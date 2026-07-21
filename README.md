@@ -161,7 +161,7 @@ sudo systemctl restart pdf-checker-worker.service
 发布目录固定为 `/opt/pdf-checker/releases/<commit>`，运行入口为
 `/opt/pdf-checker/current`。不要再用 `ln -sfn` 覆盖一个可能仍是普通目录的
 `current`。在新 release 已完成 `npm ci`、`npm run build` 且包含
-`dist/audit-worker.mjs` 后，按下面顺序切换：
+`dist/audit-worker.mjs`、`dist/server/index.js` 和 `dist/server/vinext-server.json` 后，按下面顺序切换：
 
 ```bash
 sudo systemctl stop pdf-checker-worker.service
@@ -179,6 +179,35 @@ sudo systemctl restart pdf-checker-worker.service
 重命名回 `/opt/pdf-checker/current` 后再启动旧服务。后续 `current` 已是 symlink 的
 发布或回滚均用同一脚本指向已验证的旧 commit。
 
-`client_max_body_size 25m` 只负责上传体积上限；当前应用还在接口层执行流式体积限制。
-将来如对公网开放，应在 Nginx 或受信任代理上额外配置 rate/connection limit，而不是
-依赖应用进程的单机队列。
+`client_max_body_size 25m` 只负责上传体积上限；当前应用在 multipart 输入流上逐块计数，
+不会先复制一份完整请求体。但原生 `Request.formData()` 仍会保留解析后的 `File`，随后
+PDF 校验还会执行一次 `File.arrayBuffer()`，所以单请求内存仍受 25 MiB 上限约束，并非
+直接流式落盘。将来如对公网开放，应在 Nginx 或受信任代理上额外配置
+rate/connection limit，而不是依赖应用进程的单机队列。
+
+### 首次目录迁移的人工回滚
+
+只有首次把普通 `current` 目录迁移为 symlink 后、且健康检查失败时，才执行下面的
+恢复步骤。命令会先确认 `current` 仍是 symlink，并且只存在一个真实的
+`.current.pre-symlink.*` 目录；任一断言失败都必须停止并人工确认，不能继续删除路径。
+
+```bash
+set -euo pipefail
+sudo systemctl stop pdf-checker-worker.service
+sudo systemctl stop pdf-checker.service
+current=/opt/pdf-checker/current
+test -L "$current"
+mapfile -t rollback_dirs < <(sudo find /opt/pdf-checker -mindepth 1 -maxdepth 1 -type d -name '.current.pre-symlink.*' -print)
+test "${#rollback_dirs[@]}" -eq 1
+backup="${rollback_dirs[0]}"
+sudo test -d "$backup"
+sudo rm -f -- "$current"
+sudo test ! -e "$current"
+sudo mv -T -- "$backup" "$current"
+sudo test -d "$current"
+sudo test ! -L "$current"
+sudo systemctl restart pdf-checker.service
+sudo systemctl restart pdf-checker-worker.service
+curl -fsS http://127.0.0.1:3000/ >/dev/null
+sudo systemctl is-active pdf-checker.service pdf-checker-worker.service
+```

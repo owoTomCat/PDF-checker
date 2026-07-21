@@ -61,7 +61,7 @@ test("legacy import accepts terminal tasks only", () => {
   const completed = {
     ...queued,
     status: "completed",
-    outcome: finalResult.outcome,
+    outcome: "needs_review",
     model: finalResult.model,
     progress: 100,
     processedPages: finalResult.summary.pageCount,
@@ -83,6 +83,59 @@ test("legacy import accepts terminal tasks only", () => {
   }));
   assert.throws(() => TaskImportRequestSchema.parse({
     tasks: [{ ...completed, processedPages: completed.processedPages - 1 }],
+  }));
+  assert.throws(() => TaskImportRequestSchema.parse({
+    tasks: [{ ...completed, outcome: "passed" }],
+  }));
+  const finding = {
+    code: "LEGACY_RESULT_MISMATCH",
+    scope: "RESULT" as const,
+    rightsImageIndex: 1,
+    resultIndex: 1,
+    field: "url" as const,
+    message: "Imported result requires review.",
+  };
+  const coherentIssueTask = {
+    ...completed,
+    outcome: "issues_found",
+    issueCount: 1,
+    report: {
+      ...completed.report,
+      resultIssues: [finding],
+      issues: [finding],
+    },
+  };
+  assert.equal(TaskImportRequestSchema.parse({ tasks: [coherentIssueTask] }).tasks[0]?.outcome, "issues_found");
+  assert.throws(() => TaskImportRequestSchema.parse({
+    tasks: [{
+      ...coherentIssueTask,
+      outcome: "needs_review",
+      issueCount: 0,
+      report: { ...coherentIssueTask.report, issues: [] },
+    }],
+  }));
+  assert.throws(() => TaskImportRequestSchema.parse({
+    tasks: [{
+      ...coherentIssueTask,
+      issueCount: 2,
+      report: {
+        ...coherentIssueTask.report,
+        resultIssues: [finding, finding],
+        issues: [finding, finding],
+      },
+    }],
+  }));
+  assert.throws(() => TaskImportRequestSchema.parse({
+    tasks: [{
+      ...completed,
+      summary: { ...completed.summary, warnings: ["Historical warning"] },
+    }],
+  }));
+  assert.throws(() => TaskImportRequestSchema.parse({
+    tasks: [{
+      ...completed,
+      report: { ...completed.report, verificationNotices: [finding] },
+    }],
   }));
   assert.deepEqual(TaskImportRequestSchema.parse({
     tasks: [{

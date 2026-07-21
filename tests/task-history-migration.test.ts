@@ -68,10 +68,47 @@ test("migration imports only bounded terminal schema fields and writes the marke
   assert.equal(imported[0]?.id, "legacy-1");
   assert.equal(imported[0]?.pdfAvailable, false);
   assert.equal(imported[0]?.pdfExpiresAt, null);
+  assert.equal(imported[0]?.outcome, "needs_review");
+  assert.match(
+    imported[0]?.reportText ?? "",
+    /^历史迁移记录，未由当前服务器重新核验。/,
+  );
   assert.equal("localAbsolutePath" in (imported[0] as object), false);
   assert.equal("fileBlob" in (imported[0] as object), false);
   assert.ok(storage.getItem(LEGACY_MIGRATION_MARKER_KEY));
   assert.equal(storage.getItem(LEGACY_TASK_STORAGE_KEY), null);
+});
+
+test("migration derives issues_found from a coherent historical issue report", async () => {
+  const storage = new MemoryStorage();
+  const finding = {
+    code: "LEGACY_RESULT_MISMATCH",
+    scope: "RESULT",
+    rightsImageIndex: 1,
+    resultIndex: 1,
+    field: "url",
+    message: "Imported result requires review.",
+  };
+  storage.setItem(LEGACY_TASK_STORAGE_KEY, JSON.stringify([
+    legacyTask({
+      outcome: "passed",
+      issueCount: 1,
+      report: {
+        ...legacyResult.report,
+        resultIssues: [finding],
+        issues: [finding],
+      },
+    }),
+  ]));
+  let received: AuditTaskDetail[] = [];
+
+  const result = await migrateLegacyTaskHistory(storage, async (tasks) => {
+    received = tasks;
+    return tasks.length;
+  });
+
+  assert.deepEqual(result, { status: "imported", imported: 1 });
+  assert.equal(received[0]?.outcome, "issues_found");
 });
 
 test("marker makes migration idempotent without another service call", async () => {

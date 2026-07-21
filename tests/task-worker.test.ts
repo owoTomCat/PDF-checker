@@ -117,6 +117,7 @@ function makeTestWorker(options: {
       return false;
     },
     releaseOrphanPdfDeletionClaim() {},
+    pruneStaleOrphanPdfDeletionClaims() { return 0; },
     findPendingPdfDeletions() {
       return [];
     },
@@ -630,6 +631,7 @@ test("worker rejects a private-upload symlink that resolves outside storage", as
       markPdfDeleted() { return false; },
       claimOrphanPdfDeletion() { return false; },
       releaseOrphanPdfDeletionClaim() {},
+      pruneStaleOrphanPdfDeletionClaims() { return 0; },
       findPendingPdfDeletions() { return []; },
       markPendingPdfDeleted() {},
     },
@@ -684,6 +686,7 @@ test("default PDF reader passes exact bytes to the opener and closes its handle"
       markPdfDeleted() { return false; },
       claimOrphanPdfDeletion() { return false; },
       releaseOrphanPdfDeletionClaim() {},
+      pruneStaleOrphanPdfDeletionClaims() { return 0; },
       findPendingPdfDeletions() { return []; },
       markPendingPdfDeleted() {},
     },

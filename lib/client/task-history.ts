@@ -1,4 +1,8 @@
-import { LegacyTaskImportItemSchema } from "../task-contracts";
+import {
+  deriveLegacyCompletedOutcome,
+  LegacyTaskImportItemSchema,
+  markLegacyMigrationReportText,
+} from "../task-contracts";
 import type { AuditTaskDetail } from "../types";
 
 export const LEGACY_TASK_STORAGE_KEY = "pdf-audit-workspace.tasks.v4";
@@ -162,6 +166,13 @@ function terminalLegacyTask(value: unknown): AuditTaskDetail | null {
     pdfExpiresAt: null,
     pdfAvailable: false,
   };
+  const rawReport = source.report;
+  const derivedOutcome =
+    rawReport &&
+    typeof rawReport === "object" &&
+    Array.isArray((rawReport as { issues?: unknown }).issues)
+      ? deriveLegacyCompletedOutcome(rawReport as { issues: readonly unknown[] })
+      : "needs_review";
   const candidate = source.status === "failed"
     ? {
       ...base,
@@ -179,15 +190,17 @@ function terminalLegacyTask(value: unknown): AuditTaskDetail | null {
     }
     : {
       ...base,
-      outcome: source.outcome,
+      outcome: derivedOutcome,
       model: source.model,
       progress: source.progress,
       errorCode: null,
       errorMessage: null,
       issueCount: source.issueCount ?? null,
       summary: source.summary ?? null,
-      reportText: typeof source.reportText === "string" ? source.reportText : null,
-      report: source.report ?? null,
+      reportText: typeof source.reportText === "string"
+        ? markLegacyMigrationReportText(source.reportText)
+        : null,
+      report: rawReport ?? null,
     };
   const parsed = LegacyTaskImportItemSchema.safeParse(candidate);
   return parsed.success ? parsed.data : null;

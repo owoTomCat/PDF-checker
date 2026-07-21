@@ -17,6 +17,7 @@ import {
   cleanupTaskFiles,
   defaultTaskFileOperations,
   deleteTaskPdf,
+  ORPHAN_CLAIM_LEASE_MS,
   persistPdf,
   resolveTaskDataPaths,
   validatePdfUpload,
@@ -300,6 +301,7 @@ test("cleanup surfaces an orphan-claim release failure ahead of the stale-file f
           releases += 1;
           throw new Error("database unavailable");
         },
+        pruneStaleOrphanPdfDeletionClaims() { return 0; },
         findPendingPdfDeletions() { return []; },
         markPendingPdfDeleted() {},
       },
@@ -316,6 +318,109 @@ test("cleanup surfaces an orphan-claim release failure ahead of the stale-file f
   );
   assert.equal(releases, 1);
   await access(orphanPath);
+});
+
+test("cleanup reclaims a stale durable claim after unlink and release both fail", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-orphan-lease-retry-"));
+  const db = openTaskDatabase(root);
+  const repository = new TaskRepository(db);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { uploadDir } = resolveTaskDataPaths(root);
+  await defaultTaskFileOperations.mkdir(uploadDir, { recursive: true, mode: 0o700 });
+  const orphanPath = path.join(uploadDir, `${orphanId}.pdf`);
+  await writeFile(orphanPath, "%PDF-orphan", { mode: 0o600 });
+  await utimes(orphanPath, new Date("2026-07-19T22:00:00.000Z"), new Date("2026-07-19T22:00:00.000Z"));
+  let releaseFails = true;
+  const cleanupRepository = {
+    findExpiredPdfTasks: repository.findExpiredPdfTasks.bind(repository),
+    markPdfDeleted: repository.markPdfDeleted.bind(repository),
+    claimOrphanPdfDeletion: repository.claimOrphanPdfDeletion.bind(repository),
+    releaseOrphanPdfDeletionClaim(pdfPath: string) {
+      if (releaseFails) throw new Error("database unavailable");
+      repository.releaseOrphanPdfDeletionClaim(pdfPath);
+    },
+    pruneStaleOrphanPdfDeletionClaims(staleBefore: string) {
+      return repository.pruneStaleOrphanPdfDeletionClaims(staleBefore);
+    },
+    findPendingPdfDeletions: repository.findPendingPdfDeletions.bind(repository),
+    markPendingPdfDeleted: repository.markPendingPdfDeleted.bind(repository),
+  };
+
+  await assert.rejects(
+    cleanupTaskFiles({
+      repository: cleanupRepository,
+      dataDir: root,
+      now: cleanupNow,
+      fileOperations: {
+        ...defaultTaskFileOperations,
+        unlink: async () => {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        },
+      },
+    }),
+    (error: unknown) => (error as { code?: string }).code === "ORPHAN_CLAIM_RELEASE_FAILED",
+  );
+  const persistedClaim = db.prepare(
+    "SELECT COUNT(*) AS count FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
+  ).get(orphanPath) as { count: number };
+  assert.equal(persistedClaim.count, 1);
+
+  releaseFails = false;
+  const afterLease = new Date(Date.parse(cleanupNow) + ORPHAN_CLAIM_LEASE_MS + 1).toISOString();
+  const retried = await cleanupTaskFiles({
+    repository: cleanupRepository,
+    dataDir: root,
+    now: afterLease,
+  });
+  assert.equal(retried.deletedOrphanPdfs, 1);
+  await assert.rejects(access(orphanPath));
+});
+
+test("cleanup eventually prunes a stale claim after unlink succeeds but release fails", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-orphan-lease-prune-"));
+  const db = openTaskDatabase(root);
+  const repository = new TaskRepository(db);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { uploadDir } = resolveTaskDataPaths(root);
+  await defaultTaskFileOperations.mkdir(uploadDir, { recursive: true, mode: 0o700 });
+  const orphanPath = path.join(uploadDir, `${orphanId}.pdf`);
+  await writeFile(orphanPath, "%PDF-orphan", { mode: 0o600 });
+  await utimes(orphanPath, new Date("2026-07-19T22:00:00.000Z"), new Date("2026-07-19T22:00:00.000Z"));
+  let releaseFails = true;
+  const cleanupRepository = {
+    findExpiredPdfTasks: repository.findExpiredPdfTasks.bind(repository),
+    markPdfDeleted: repository.markPdfDeleted.bind(repository),
+    claimOrphanPdfDeletion: repository.claimOrphanPdfDeletion.bind(repository),
+    releaseOrphanPdfDeletionClaim(pdfPath: string) {
+      if (releaseFails) throw new Error("database unavailable");
+      repository.releaseOrphanPdfDeletionClaim(pdfPath);
+    },
+    pruneStaleOrphanPdfDeletionClaims(staleBefore: string) {
+      return repository.pruneStaleOrphanPdfDeletionClaims(staleBefore);
+    },
+    findPendingPdfDeletions: repository.findPendingPdfDeletions.bind(repository),
+    markPendingPdfDeleted: repository.markPendingPdfDeleted.bind(repository),
+  };
+
+  await assert.rejects(
+    cleanupTaskFiles({ repository: cleanupRepository, dataDir: root, now: cleanupNow }),
+    (error: unknown) => (error as { code?: string }).code === "ORPHAN_CLAIM_RELEASE_FAILED",
+  );
+  await assert.rejects(access(orphanPath));
+  const persistedClaim = db.prepare(
+    "SELECT COUNT(*) AS count FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
+  ).get(orphanPath) as { count: number };
+  assert.equal(persistedClaim.count, 1);
+
+  releaseFails = false;
+  const afterLease = new Date(Date.parse(cleanupNow) + ORPHAN_CLAIM_LEASE_MS + 1).toISOString();
+  await cleanupTaskFiles({ repository: cleanupRepository, dataDir: root, now: afterLease });
+  const prunedClaim = db.prepare(
+    "SELECT COUNT(*) AS count FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
+  ).get(orphanPath) as { count: number };
+  assert.equal(prunedClaim.count, 0);
 });
 
 test("cleanup retains an expired terminal task reference when unlink fails and retries later", async (t) => {

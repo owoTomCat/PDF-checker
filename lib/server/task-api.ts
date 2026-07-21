@@ -7,6 +7,8 @@ import {
   BatchDeleteRequestSchema,
   AuditTaskDetailSchema,
   AuditTaskSummarySchema,
+  deriveLegacyCompletedOutcome,
+  markLegacyMigrationReportText,
   TaskImportRequestSchema,
   TaskListQuerySchema,
 } from "../task-contracts";
@@ -264,15 +266,24 @@ export class TaskApi {
         await this.requestJson(request, MAX_LEGACY_IMPORT_BODY_BYTES),
       );
       if (!parsed.success) throw invalidInput();
-      const tasks = parsed.data.tasks.map((task) => ({
-        ...task,
-        id: `legacy-${createHash("sha256").update(`${ownerEmail}\0${task.id}`).digest("hex")}`,
-        fileName: safeUploadedFileName(task.fileName),
-        createdAt: new Date(task.createdAt).toISOString(),
-        updatedAt: new Date(task.updatedAt).toISOString(),
-        startedAt: task.startedAt ? new Date(task.startedAt).toISOString() : null,
-        completedAt: task.completedAt ? new Date(task.completedAt).toISOString() : null,
-      }));
+      const tasks = parsed.data.tasks.map((task) => {
+        const normalizedTask = task.status === "completed"
+          ? {
+            ...task,
+            outcome: deriveLegacyCompletedOutcome(task.report),
+            reportText: markLegacyMigrationReportText(task.reportText),
+          }
+          : task;
+        return {
+          ...normalizedTask,
+          id: `legacy-${createHash("sha256").update(`${ownerEmail}\0${task.id}`).digest("hex")}`,
+          fileName: safeUploadedFileName(task.fileName),
+          createdAt: new Date(task.createdAt).toISOString(),
+          updatedAt: new Date(task.updatedAt).toISOString(),
+          startedAt: task.startedAt ? new Date(task.startedAt).toISOString() : null,
+          completedAt: task.completedAt ? new Date(task.completedAt).toISOString() : null,
+        };
+      });
       return Response.json({ imported: this.repository.importOwnedTerminal(ownerEmail, tasks) });
     } catch (error) {
       return taskApiErrorResponse(error);

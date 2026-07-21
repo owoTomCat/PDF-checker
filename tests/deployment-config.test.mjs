@@ -78,13 +78,14 @@ test("worker starts the built artifact independently and web retains its web com
 });
 
 test("nginx and operations documentation preserve upload, installation, and secret-safe procedures", async () => {
-  const [nginx, readme, deploymentDesign, launcher] = await Promise.all([
+  const [nginx, readme, deploymentDesign, implementationPlan, launcher] = await Promise.all([
     readFile(new URL("../deploy/nginx-pdf-checker.conf", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../docs/superpowers/specs/2026-07-18-github-main-tencent-deployment-design.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/superpowers/plans/2026-07-20-server-side-pdf-processing.md", import.meta.url), "utf8"),
     readFile(new URL("../scripts/run-vinext.mjs", import.meta.url), "utf8"),
   ]);
-  const documentation = `${readme}\n${deploymentDesign}`;
+  const documentation = `${readme}\n${deploymentDesign}\n${implementationPlan}`;
 
   assert.match(nginx, /^\s*client_max_body_size\s+25m;$/m);
   assert.match(nginx, /^\s*proxy_set_header\s+oai-authenticated-user-email\s+"";$/m);
@@ -117,6 +118,26 @@ test("nginx and operations documentation preserve upload, installation, and secr
   assert.match(documentation, /sqlite3[^\n]*\.backup|systemctl stop[^\n]*pdf-checker/);
   assert.match(documentation, /not acceptable for a public or multi-user deployment|不适用于公开或多用户部署/i);
   assert.match(documentation, /dist\/audit-worker\.mjs/);
+  for (const source of [readme, deploymentDesign, implementationPlan]) {
+    let previous = -1;
+    for (const command of [
+      "sudo systemctl stop pdf-checker-worker.service",
+      "sudo systemctl stop pdf-checker.service",
+      'test -L "$current"',
+      "mapfile -t rollback_dirs",
+      'test "${#rollback_dirs[@]}" -eq 1',
+      'sudo rm -f -- "$current"',
+      'sudo mv -T -- "$backup" "$current"',
+      "sudo systemctl restart pdf-checker.service",
+      "sudo systemctl restart pdf-checker-worker.service",
+      "curl -fsS http://127.0.0.1:3000/ >/dev/null",
+    ]) {
+      const index = source.indexOf(command, previous + 1);
+      assert.ok(index > previous, `rollback documentation must contain ordered command: ${command}`);
+      previous = index;
+    }
+    assert.doesNotMatch(source, /sudo mv\s+"\$backup"\s+"\$current"/);
+  }
 });
 
 test("release activation uses an atomic same-parent symlink and protects a first directory migration", async () => {
@@ -126,6 +147,8 @@ test("release activation uses an atomic same-parent symlink and protects a first
   assert.match(source, /PDF_CHECKER_ROOT/);
   assert.match(source, /\$releases\/\$commit/);
   assert.match(source, /dist\/audit-worker\.mjs/);
+  assert.match(source, /dist\/server\/index\.js/);
+  assert.match(source, /dist\/server\/vinext-server\.json/);
   assert.match(source, /\.current\.next\./);
   assert.match(source, /\.current\.pre-symlink\./);
   assert.match(source, /mv -Tf/);

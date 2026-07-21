@@ -54,7 +54,7 @@ function terminalLegacyTask(id: string, overrides: Record<string, unknown> = {})
     fileSize: 12,
     fileType: "application/pdf",
     status: "completed",
-    outcome: result.outcome,
+    outcome: result.report.issues.length > 0 ? "issues_found" : "needs_review",
     model: result.model,
     progress: 100,
     processedPages: 1,
@@ -293,6 +293,12 @@ test("legacy import is terminal-only, owner-bound, idempotent, and limited to 80
   assert.equal(stored?.fileName, "legacy.pdf");
   assert.equal(stored?.errorCode, null);
   assert.equal(stored?.errorMessage, null);
+  const storedDetail = api.repository.getOwned("owner@example.com", stored!.id);
+  assert.equal(storedDetail?.outcome, "needs_review");
+  assert.match(
+    storedDetail?.reportText ?? "",
+    /^历史迁移记录，未由当前服务器重新核验。/,
+  );
 
   const repeat = await api.importLegacy(authenticatedRequest("https://pdf.example/api/tasks/import", {
     method: "POST",
@@ -322,6 +328,22 @@ test("legacy import is terminal-only, owner-bound, idempotent, and limited to 80
     body: JSON.stringify({ tasks: tooMany }),
   }));
   assert.equal(overflow.status, 422);
+});
+
+test("legacy import rejects a caller-supplied passed outcome", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-passed-legacy-"));
+  const api = createTaskApiForDataDir(root, { requireAuth: true });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const response = await api.importLegacy(authenticatedRequest("https://pdf.example/api/tasks/import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tasks: [terminalLegacyTask("passed-legacy", { outcome: "passed" })] }),
+  }));
+
+  assert.equal(response.status, 422);
+  assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
 });
 
 test("legacy import rejects a completed task without a verified report", async (t) => {
