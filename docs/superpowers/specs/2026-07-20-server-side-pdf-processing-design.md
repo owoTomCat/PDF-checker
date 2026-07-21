@@ -133,14 +133,16 @@ The current Tencent deployment uses the explicit single-tenant owner so the same
 
 ### `POST /api/tasks`
 
-Accept an `application/pdf` raw request body. The browser sends the original `File` once and places
-its URL-encoded name in the single bounded `fileName` query parameter. Return `202 Accepted` with
-the created task summary.
+Accept an `application/pdf` raw request body at the exact URL `/api/tasks`. The browser sends the
+original `File` once and places its canonical UTF-8 percent-encoded name in the bounded ASCII
+`X-Pdf-File-Name` header. The name never enters the URL or default Nginx access log; after strict
+decoding and validation it is stored in SQLite. Return `202 Accepted` with the created task summary.
 
 Validation order:
 
 1. same-origin request plus either authenticated ownership or an explicitly configured single-tenant owner;
-2. exactly one non-empty, safe filename no longer than 255 characters;
+2. exactly one canonical ASCII filename header without a merged comma value, decoding to one
+   non-empty, safe filename no longer than 255 characters;
 3. media type is `application/pdf`;
 4. raw body is non-empty and no larger than 20 MiB;
 5. binary prefix begins with `%PDF-`;

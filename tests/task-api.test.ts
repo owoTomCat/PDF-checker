@@ -36,10 +36,13 @@ function rawPdfRequest(
   contentType = "application/pdf",
 ) {
   return authenticatedRequest(
-    `https://pdf.example/api/tasks?fileName=${encodeURIComponent(fileName)}`,
+    "https://pdf.example/api/tasks",
     {
       method: "POST",
-      headers: { "content-type": contentType },
+      headers: {
+        "content-type": contentType,
+        "x-pdf-file-name": encodeURIComponent(fileName),
+      },
       body,
     },
   );
@@ -131,14 +134,14 @@ test("raw upload preserves a Unicode filename while persisting to a private UUID
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const response = await api.create(rawPdfRequest(
-    "上海 外网溯源报告.pdf",
+    "C:\\private\\上海,外网溯源报告.pdf",
     "%PDF-1.7\nbody",
     "Application/PDF; profile=archive",
   ));
 
   assert.equal(response.status, 202);
   const summary = await response.json() as { fileName: string; fileSize: number };
-  assert.equal(summary.fileName, "上海 外网溯源报告.pdf");
+  assert.equal(summary.fileName, "上海,外网溯源报告.pdf");
   assert.equal(summary.fileSize, new TextEncoder().encode("%PDF-1.7\nbody").byteLength);
   const stored = api.repository.getOwnedWorker("owner@example.com", taskId);
   assert.equal(path.basename(stored!.pdfPath!), `${taskId}.pdf`);
@@ -184,21 +187,65 @@ test("rejects an overlong public filename before creating file artifacts", async
   await assert.rejects(access(path.join(root, "uploads")));
 });
 
-test("raw upload rejects missing or duplicate filenames, invalid media types, and invalid magic", async (t) => {
+test("raw upload rejects invalid filename headers, media types, and PDF magic", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-raw-invalid-"));
   const api = createTaskApiForDataDir(root, { requireAuth: true });
   t.after(() => api.dispose());
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const requests = [
-    authenticatedRequest("https://pdf.example/api/tasks", {
+    authenticatedRequest("https://pdf.example/api/tasks?fileName=leaked.pdf", {
       method: "POST",
       headers: { "content-type": "application/pdf" },
       body: "%PDF-1.7\nbody",
     }),
-    authenticatedRequest("https://pdf.example/api/tasks?fileName=one.pdf&fileName=two.pdf", {
+    authenticatedRequest("https://pdf.example/api/tasks", {
       method: "POST",
-      headers: { "content-type": "application/pdf" },
+      headers: [
+        ["content-type", "application/pdf"],
+        ["x-pdf-file-name", "one.pdf"],
+        ["x-pdf-file-name", "two.pdf"],
+      ],
+      body: "%PDF-1.7\nbody",
+    }),
+    authenticatedRequest("https://pdf.example/api/tasks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/pdf",
+        "x-pdf-file-name": "%E0%A4%A",
+      },
+      body: "%PDF-1.7\nbody",
+    }),
+    authenticatedRequest("https://pdf.example/api/tasks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/pdf",
+        "x-pdf-file-name": "one.pdf,two.pdf",
+      },
+      body: "%PDF-1.7\nbody",
+    }),
+    authenticatedRequest("https://pdf.example/api/tasks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/pdf",
+        "x-pdf-file-name": "%41.pdf",
+      },
+      body: "%PDF-1.7\nbody",
+    }),
+    authenticatedRequest("https://pdf.example/api/tasks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/pdf",
+        "x-pdf-file-name": "a".repeat(2_305),
+      },
+      body: "%PDF-1.7\nbody",
+    }),
+    authenticatedRequest("https://pdf.example/api/tasks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/pdf",
+        "x-pdf-file-name": `${String.fromCharCode(0x80)}.pdf`,
+      },
       body: "%PDF-1.7\nbody",
     }),
     rawPdfRequest("case.pdf", "%PDF-1.7\nbody", "application/octet-stream"),
@@ -223,9 +270,12 @@ test("task upload enforces its body cap for chunked and dishonest content length
   oversized.set(new TextEncoder().encode("%PDF-"));
 
   for (const contentLength of [undefined, "1"]) {
-    const response = await api.create(streamedRequest("https://pdf.example/api/tasks?fileName=large.pdf", {
+    const response = await api.create(streamedRequest("https://pdf.example/api/tasks", {
       method: "POST",
-      headers: { "content-type": "application/pdf" },
+      headers: {
+        "content-type": "application/pdf",
+        "x-pdf-file-name": "large.pdf",
+      },
       chunks: [oversized],
       contentLength,
     }));

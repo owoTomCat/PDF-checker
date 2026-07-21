@@ -108,6 +108,12 @@ test("nginx and operations documentation preserve upload, installation, and secr
   assert.match(nginx, /^\s*limit_req\s+zone=pdf_upload_rate\s+burst=12\s+nodelay;$/m);
   assert.match(nginx, /^\s*limit_req_status\s+429;$/m);
   assert.match(nginx, /^\s*proxy_set_header\s+oai-authenticated-user-email\s+"";$/m);
+  assert.match(
+    nginx,
+    /^\s*proxy_set_header\s+X-Pdf-File-Name\s+\$http_x_pdf_file_name;$/m,
+  );
+  assert.doesNotMatch(nginx, /log_format[^;]*x-pdf-file-name/i);
+  assert.doesNotMatch(nginx, /access_log[^;]*x-pdf-file-name/i);
   assert.match(launcher, /--hostname[\s\S]*127\.0\.0\.1/);
   assert.doesNotMatch(launcher, /\.\.\.process\.argv\.slice\(3\)/);
   for (const command of [
@@ -138,6 +144,9 @@ test("nginx and operations documentation preserve upload, installation, and secr
   assert.match(documentation, /not acceptable for a public or multi-user deployment|不适用于公开或多用户部署/i);
   assert.match(documentation, /dist\/audit-worker\.mjs/);
   assert.match(readme, /application\/pdf/);
+  assert.match(readme, /X-Pdf-File-Name/);
+  assert.match(readme, /SQLite/);
+  assert.doesNotMatch(readme, /fileName` 查询参数/);
   assert.match(readme, /约\s*2\s*倍\s*20 MiB/);
   assert.match(readme, /vinext/i);
   assert.match(readme, /3\s*个.*并发上传|并发上传.*3\s*个/s);

@@ -106,12 +106,15 @@ export function uploadTask(
   fetchImpl: TaskFetch = defaultFetch,
   signal?: AbortSignal,
 ): Promise<AuditTaskSummary> {
-  const search = new URLSearchParams({ fileName: file.name });
+  const encodedFileName = encodeURIComponent(file.name);
   return requestJson(
-    `/api/tasks?${search.toString()}`,
+    "/api/tasks",
     {
       method: "POST",
-      headers: { "Content-Type": "application/pdf" },
+      headers: {
+        "Content-Type": "application/pdf",
+        "X-Pdf-File-Name": encodedFileName,
+      },
       body: file,
       signal,
     },

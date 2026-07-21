@@ -32,6 +32,8 @@ import { taskOwnerFromRequest } from "./task-owner";
 
 export const DEFAULT_PDF_RETENTION_HOURS = 72;
 const MAX_PDF_RETENTION_HOURS = 8_760;
+const PDF_FILE_NAME_HEADER = "x-pdf-file-name";
+const MAX_ENCODED_PDF_FILE_NAME_LENGTH = 2_304;
 export const MAX_LEGACY_IMPORT_BODY_BYTES = 1_310_720;
 export const MAX_BATCH_DELETE_BODY_BYTES = 64 * 1024;
 
@@ -119,9 +121,25 @@ function safeUploadedFileName(name: string): string {
 }
 
 function rawPdfFileName(request: Request): string {
-  const values = new URL(request.url).searchParams.getAll("fileName");
-  if (values.length !== 1) throw invalidInput();
-  return safeUploadedFileName(values[0]);
+  if (new URL(request.url).search !== "") throw invalidInput();
+  const encoded = request.headers.get(PDF_FILE_NAME_HEADER);
+  if (
+    encoded === null ||
+    encoded.length === 0 ||
+    encoded.length > MAX_ENCODED_PDF_FILE_NAME_LENGTH ||
+    encoded.includes(",") ||
+    !/^[\x21-\x7e]+$/.test(encoded)
+  ) {
+    throw invalidInput();
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(encoded);
+  } catch {
+    throw invalidInput();
+  }
+  if (encodeURIComponent(decoded) !== encoded) throw invalidInput();
+  return safeUploadedFileName(decoded);
 }
 
 function isRawPdfRequest(request: Request): boolean {

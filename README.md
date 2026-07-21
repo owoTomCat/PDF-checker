@@ -4,7 +4,7 @@ PDF-checker 使用阿里云百炼 `qwen3.7-plus` 对“PDF 外网溯源报告”
 
 ## 当前处理方式
 
-浏览器只负责选择文件、上传、查看历史任务和轮询进度。每个原始 PDF 会以 `application/pdf` 原始请求体通过 `POST /api/tasks` 上传（文件名使用 URL 编码的 `fileName` 查询参数），写入服务器私有目录后再创建 SQLite 排队任务；独立 worker 在服务器上解析和渲染 PDF、调用模型链路、把进度和最终结果写回 SQLite。关闭或刷新浏览器不会中断任务。
+浏览器只负责选择文件、上传、查看历史任务和轮询进度。每个原始 PDF 会以 `application/pdf` 原始请求体通过精确的 `POST /api/tasks` 上传；UTF-8 文件名可逆 percent 编码后只放在 `X-Pdf-File-Name` ASCII 请求头中，不进入 URL。服务器校验并解码后把文件名保存在 SQLite，原始 PDF 写入私有目录，再创建排队任务；独立 worker 在服务器上解析和渲染 PDF、调用模型链路、把进度和最终结果写回 SQLite。关闭或刷新浏览器不会中断任务。
 
 - 原始 PDF 仅存放在服务器 `/var/lib/pdf-checker/uploads`，默认上传后保留 72 小时；任务排队或处理中不会被清理。
 - 结果和任务历史保存在 `/var/lib/pdf-checker/data/pdf-checker.sqlite`；渲染页、裁剪图、原始模型响应和 API Key 不会持久化或返回给浏览器。
@@ -93,7 +93,7 @@ sudo ss -ltnp | grep ':3000'
 
 输出应只显示 `127.0.0.1:3000`（如启用 IPv6 loopback，也只能是 `::1:3000`）。
 
-Nginx 使用 `deploy/nginx-pdf-checker.conf`，并保留 `client_max_body_size 25m`，为最大 20 MiB 的原始 PDF 请求体留出明确余量。上传专用 key 只匹配 `POST /api/tasks`：同一来源最多 3 个并发上传，请求速率为每秒 6 个并允许 `burst=12`；空 key 不计数，所以历史/进度 GET 轮询和其他接口不受该限制。安装或更新 Nginx 配置后执行 `sudo nginx -t`，再重载 Nginx。
+Nginx 使用 `deploy/nginx-pdf-checker.conf`，并保留 `client_max_body_size 25m`，为最大 20 MiB 的原始 PDF 请求体留出明确余量。上传专用 key 只匹配 `POST /api/tasks`：同一来源最多 3 个并发上传，请求速率为每秒 6 个并允许 `burst=12`；空 key 不计数，所以历史/进度 GET 轮询和其他接口不受该限制。`X-Pdf-File-Name` 只转发给应用，默认 combined access log 不记录请求头；由于客户端 URL 没有 query，正常上传日志不含文件名。安装或更新 Nginx 配置后执行 `sudo nginx -t`，再重载 Nginx。
 
 当前 Nginx 会显式清空入站 `oai-authenticated-user-email`，所以当前配置不支持认证模式；不能只把 `PDF_AUDIT_REQUIRE_AUTH` 改为 `true`。未来可信认证代理必须先完成认证，拒绝或清除客户端伪造的该头，再以代理控制的不可伪造变量覆盖它，同时保持 3000 端口仅 loopback 可见。
 
@@ -182,7 +182,8 @@ sudo systemctl restart pdf-checker-worker.service
 `client_max_body_size 25m` 只负责代理层上传体积上限。浏览器直接发送
 `application/pdf` 原始请求体，不再构造 multipart；因此 vinext 不会把上传误判为
 progressive Server Action，也不会额外执行 `request.clone()`、`formData()` 或保留一个
-解析后的 `File`。应用的有界读取器逐块计数，最多保留输入 chunks 和一份连续
+解析后的 `File`。文件名只以规范 percent 编码存在于受控的 `X-Pdf-File-Name` 头，
+解码并校验后才写入 SQLite，不进入 URL 或默认 Nginx access log。应用的有界读取器逐块计数，最多保留输入 chunks 和一份连续
 `Uint8Array`，峰值约 2 倍 20 MiB payload 加运行时开销，然后才校验 `%PDF-` 并写入
 UUID 命名的私有文件；这仍不是直接流式落盘。Nginx 已只对 `POST /api/tasks` 配置
 同源 3 个并发连接以及 `6r/s`、`burst=12` 的请求限制，不会占用 GET 轮询额度。

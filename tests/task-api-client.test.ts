@@ -54,11 +54,13 @@ test("upload sends the original PDF once and parses the queued response", async 
     return Response.json(summary(), { status: 202 });
   });
 
-  const url = new URL(capturedUrl, "https://example.invalid");
-  assert.equal(url.pathname, "/api/tasks");
-  assert.equal(url.searchParams.get("fileName"), file.name);
+  assert.equal(capturedUrl, "/api/tasks");
   assert.equal(captured?.method, "POST");
   assert.equal(new Headers(captured?.headers).get("content-type"), "application/pdf");
+  assert.equal(
+    new Headers(captured?.headers).get("x-pdf-file-name"),
+    encodeURIComponent(file.name),
+  );
   assert.equal(captured?.body, file);
   assert.equal(captured?.body instanceof FormData, false);
   assert.equal(task.status, "queued");
