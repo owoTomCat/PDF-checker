@@ -530,7 +530,12 @@ export function createBailianClient(options: BailianClientOptions) {
       return complete(buildUrlReviewRequest(input), UrlReviewBatchSchema, undefined, signal);
     },
     extractTable(input: TableModelInput, signal?: AbortSignal): Promise<TableBatch> {
-      return complete(buildTableRequest(input), TableBatchSchema, undefined, signal);
+      return complete(
+        buildTableRequest(input),
+        TableBatchSchema,
+        "顶层只能包含 headers、rows、warnings；rows[].tableRowId 必须非空且唯一；所有 regionId 只能使用本批次提供的区域 ID。",
+        signal,
+      );
     },
     associateRows(input: AssociationModelInput, signal?: AbortSignal): Promise<AssociationBatch> {
       return complete(buildAssociationRequest(input), AssociationBatchSchema, undefined, signal);

@@ -13,6 +13,7 @@ import type {
   RenderedImage,
   RenderedPdfDocument,
 } from "./gateway";
+import { TABLE_ASSOCIATION_SKIPPED_REASON } from "./fallbacks";
 
 export type PipelineStage =
   | "rendering"
@@ -532,7 +533,15 @@ export async function runAuditPipeline(options: {
     }));
     let associations: StrictFinalizeRequest["associations"]["associations"] = [];
     const associationWarnings: string[] = [];
-    if (screenshotLocators.length > 0) {
+    if (screenshotLocators.length > 0 && tableRowLocators.length === 0) {
+      associations = screenshotLocators.map((screenshot) => ({
+        screenshotId: screenshot.id,
+        tableRowId: null,
+        confidence: 0,
+        reason: TABLE_ASSOCIATION_SKIPPED_REASON,
+      }));
+      associationWarnings.push(TABLE_ASSOCIATION_SKIPPED_REASON);
+    } else if (screenshotLocators.length > 0) {
       throwIfAborted(signal);
       const output = await gateway.associate({
         screenshots: screenshotLocators,

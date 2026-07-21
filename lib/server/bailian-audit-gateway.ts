@@ -13,6 +13,7 @@ import {
   UrlReviewRequestMetadataSchema,
 } from "../ai/contracts";
 import type { AuditStageGateway, RenderedImage } from "../audit/gateway";
+import { TABLE_EXTRACTION_FALLBACK_WARNING } from "../audit/fallbacks";
 import { buildFinalAuditResult } from "../audit-result";
 import {
   BailianClientError,
@@ -47,6 +48,15 @@ function invalidModelOutput(message: string): never {
 
 function invalidInput(message: string): never {
   throw new AuditGatewayInputError(message);
+}
+
+function tableExtractionFallback() {
+  return TableApiResponseSchema.parse({
+    model: "qwen3.7-plus",
+    headers: [],
+    rows: [],
+    warnings: [TABLE_EXTRACTION_FALLBACK_WARNING],
+  });
 }
 
 function assertImageCount(images: RenderedImage[], expected: number) {
@@ -242,27 +252,37 @@ export function createBailianAuditGateway(
       assertImageCount(images, metadata.regions.length);
       const dataUrls = await imageDataUrls(images);
       const client = resolveClient();
-      const output = await client.extractTable({
-        fileName: metadata.fileName,
-        totalPages: metadata.totalPages,
-        regions: metadata.regions.map((region, index) => ({
-          ...region,
-          dataUrl: dataUrls[index],
-        })),
-      }, signal);
-      const unexpectedRegion = [...output.headers, ...output.rows].some(
-        (item) => !regionIds.has(item.regionId),
-      );
-      const rowIds = new Set(output.rows.map((row) => row.tableRowId));
-      if (unexpectedRegion || rowIds.size !== output.rows.length) {
-        invalidModelOutput(
-          "模型返回的汇总表记录与表格区域不匹配。",
+      try {
+        const output = await client.extractTable({
+          fileName: metadata.fileName,
+          totalPages: metadata.totalPages,
+          regions: metadata.regions.map((region, index) => ({
+            ...region,
+            dataUrl: dataUrls[index],
+          })),
+        }, signal);
+        const unexpectedRegion = [...output.headers, ...output.rows].some(
+          (item) => !regionIds.has(item.regionId),
         );
+        const rowIds = new Set(output.rows.map((row) => row.tableRowId));
+        if (unexpectedRegion || rowIds.size !== output.rows.length) {
+          invalidModelOutput(
+            "模型返回的汇总表记录与表格区域不匹配。",
+          );
+        }
+        return TableApiResponseSchema.parse({
+          model: "qwen3.7-plus",
+          ...output,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof BailianClientError) ||
+          error.code !== "INVALID_MODEL_OUTPUT"
+        ) {
+          throw error;
+        }
+        return tableExtractionFallback();
       }
-      return TableApiResponseSchema.parse({
-        model: "qwen3.7-plus",
-        ...output,
-      });
     },
 
     async associate(rawInput, signal) {

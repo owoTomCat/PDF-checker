@@ -310,6 +310,152 @@ test("records a missing address bar without substituting the table URL", async (
   assert.equal(result.outcome, "needs_review");
 });
 
+test("skips model association and completes for screenshots when table extraction degraded", async () => {
+  const calls: string[] = [];
+  let finalBody: StrictFinalizeRequest | undefined;
+  const secondScreenshotRegion = {
+    ...strictLayout.pages[0].regions.find(
+      (region) => region.regionId === "screenshot-1",
+    )!,
+    regionId: "screenshot-2",
+    resultIndex: 2,
+    readingOrder: 5,
+  };
+  const secondAddressRegion = {
+    ...strictLayout.pages[0].regions.find(
+      (region) => region.regionId === "address-1",
+    )!,
+    regionId: "address-2",
+    parentRegionId: "screenshot-2",
+    resultIndex: 2,
+    readingOrder: 6,
+  };
+  const twoScreenshotLayout = {
+    ...strictLayout,
+    pages: [
+      {
+        ...strictLayout.pages[0],
+        regions: [
+          ...strictLayout.pages[0].regions,
+          secondScreenshotRegion,
+          secondAddressRegion,
+        ],
+      },
+    ],
+  };
+  const secondScreenshot = {
+    ...strictEvidence.screenshots[0],
+    screenshotId: "screenshot-2",
+    regionId: "screenshot-2",
+    resultIndex: 2,
+    addressBarRegionId: "address-2",
+    addressHost: {
+      ...strictEvidence.screenshots[0].addressHost,
+      regionId: "address-2",
+    },
+    initialUrl: {
+      ...strictEvidence.screenshots[0].initialUrl,
+      regionId: "address-2",
+    },
+  };
+  const document: RenderedPdfDocument = {
+    pageCount: 1,
+    async renderPage() {
+      return jpeg();
+    },
+    async renderRegion(_pageNumber, bounds, options) {
+      const type = regionTypeForBounds(bounds);
+      if (type === "address_bar" && options.mimeType === "image/png") {
+        return png();
+      }
+      return jpeg();
+    },
+    async destroy() {},
+  };
+  const tableWarning =
+    "表格自动提取结构不完整，未用于自动比对，需人工复核。";
+  const associationReason =
+    "汇总表未提取到可用记录，无法自动关联，需人工复核。";
+  const gateway: AuditStageGateway = {
+    async locate() {
+      return { model: "qwen3.7-plus", ...twoScreenshotLayout };
+    },
+    async recognize() {
+      return {
+        model: "qwen3.7-plus",
+        ...strictEvidence,
+        screenshots: [...strictEvidence.screenshots, secondScreenshot],
+      };
+    },
+    async reviewUrls() {
+      return {
+        model: "qwen3.7-plus",
+        ...strictUrlReview,
+        reviews: [
+          ...strictUrlReview.reviews,
+          {
+            ...strictUrlReview.reviews[0],
+            screenshotId: "screenshot-2",
+          },
+        ],
+      };
+    },
+    async extractTable() {
+      return {
+        model: "qwen3.7-plus",
+        headers: [],
+        rows: [],
+        warnings: [tableWarning, tableWarning],
+      };
+    },
+    async associate() {
+      calls.push("associate");
+      throw new Error("association model must not run without table rows");
+    },
+    async finalize(input) {
+      calls.push("finalize");
+      finalBody = input;
+      return buildFinalAuditResult(input);
+    },
+  };
+
+  const result = await runAuditPipeline({
+    fileName: "example.pdf",
+    fileSize: 16,
+    fileType: "application/pdf",
+    pdf: document,
+    gateway,
+  });
+
+  assert.deepEqual(calls, ["finalize"]);
+  assert.deepEqual(finalBody?.table, {
+    headers: [],
+    rows: [],
+    warnings: [tableWarning],
+  });
+  assert.deepEqual(finalBody?.associations, {
+    associations: [
+      {
+        screenshotId: "screenshot-1",
+        tableRowId: null,
+        confidence: 0,
+        reason: associationReason,
+      },
+      {
+        screenshotId: "screenshot-2",
+        tableRowId: null,
+        confidence: 0,
+        reason: associationReason,
+      },
+    ],
+    warnings: [associationReason],
+  });
+  assert.deepEqual(finalBody?.warnings, [tableWarning, associationReason]);
+  assert.equal(result.outcome, "needs_review");
+  assert.equal(result.summary.extractionComplete, false);
+  assert.match(result.reportText, /需人工复核|无法唯一关联/);
+});
+
 test("destroys the PDF document when its page count exceeds the limit", async () => {
   let destroyed = false;
   const document: RenderedPdfDocument = {

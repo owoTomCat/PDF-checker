@@ -232,6 +232,32 @@ test("adds a JSON correction prompt only after invalid model output", async () =
   assert.match(bodies[1], /上一次响应未通过/);
 });
 
+test("table correction repeats the static safe shape without echoing model values", async () => {
+  const bodies: string[] = [];
+  const client = clientWithFetch(async (_url, init) => {
+    bodies.push(String(init?.body));
+    return modelResponse({
+      invalid: "UNTRUSTED_RAW_MODEL_VALUE",
+    });
+  });
+
+  await assert.rejects(
+    client.extractTable(tableInput),
+    (error: unknown) =>
+      error instanceof BailianClientError &&
+      error.code === "INVALID_MODEL_OUTPUT",
+  );
+
+  assert.equal(bodies.length, 2);
+  assert.match(
+    bodies[1],
+    /顶层只能包含 headers、rows、warnings/,
+  );
+  assert.match(bodies[1], /rows\[\]\.tableRowId 必须非空且唯一/);
+  assert.match(bodies[1], /regionId 只能使用本批次提供的区域 ID/);
+  assert.doesNotMatch(bodies[1], /UNTRUSTED_RAW_MODEL_VALUE/);
+});
+
 test("retries a layout that omits one requested page", async () => {
   const bodies: string[] = [];
   const client = clientWithFetch(async (_url, init) => {
