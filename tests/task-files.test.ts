@@ -20,7 +20,7 @@ import {
   ORPHAN_CLAIM_LEASE_MS,
   persistPdf,
   resolveTaskDataPaths,
-  validatePdfUpload,
+  validatePdfBytes,
 } from "../lib/server/task-files";
 
 const expiredAt = "2026-07-17T00:00:00.000Z";
@@ -32,11 +32,7 @@ const orphanId = "9ce916b4-7297-4f7f-aac5-2e6e84de2032";
 test("validates magic bytes and persists a private UUID-named PDF", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-files-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const file = new File([new TextEncoder().encode("%PDF-1.7\nbody")], "../../case.pdf", {
-    type: "application/pdf",
-  });
-
-  const bytes = await validatePdfUpload(file);
+  const bytes = validatePdfBytes(new TextEncoder().encode("%PDF-1.7\nbody"));
   const pdfPath = await persistPdf({ dataDir: root, taskId: terminalId, bytes });
 
   assert.equal(path.basename(pdfPath), `${terminalId}.pdf`);
@@ -47,9 +43,11 @@ test("validates magic bytes and persists a private UUID-named PDF", async (t) =>
   assert.deepEqual(await readFile(pdfPath), Buffer.from(bytes));
 });
 
-test("rejects renamed non-PDF content", async () => {
-  const file = new File(["not a pdf"], "case.pdf", { type: "application/pdf" });
-  await assert.rejects(validatePdfUpload(file), /PDF 文件内容无效/);
+test("rejects bytes without PDF magic", () => {
+  assert.throws(
+    () => validatePdfBytes(new TextEncoder().encode("not a pdf")),
+    /PDF 文件内容无效/,
+  );
 });
 
 test("cleanup removes expired terminal and stale unreferenced files without deleting active PDFs", async (t) => {

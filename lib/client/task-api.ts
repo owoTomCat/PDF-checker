@@ -106,11 +106,15 @@ export function uploadTask(
   fetchImpl: TaskFetch = defaultFetch,
   signal?: AbortSignal,
 ): Promise<AuditTaskSummary> {
-  const form = new FormData();
-  form.set("pdf", file);
+  const search = new URLSearchParams({ fileName: file.name });
   return requestJson(
-    "/api/tasks",
-    { method: "POST", body: form, signal },
+    `/api/tasks?${search.toString()}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf" },
+      body: file,
+      signal,
+    },
     AuditTaskSummarySchema,
     fetchImpl,
   );

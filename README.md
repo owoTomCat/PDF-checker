@@ -4,7 +4,7 @@ PDF-checker 使用阿里云百炼 `qwen3.7-plus` 对“PDF 外网溯源报告”
 
 ## 当前处理方式
 
-浏览器只负责选择文件、上传、查看历史任务和轮询进度。每个原始 PDF 会先通过 `POST /api/tasks` 写入服务器私有目录，再创建 SQLite 排队任务；独立 worker 在服务器上解析和渲染 PDF、调用模型链路、把进度和最终结果写回 SQLite。关闭或刷新浏览器不会中断任务。
+浏览器只负责选择文件、上传、查看历史任务和轮询进度。每个原始 PDF 会以 `application/pdf` 原始请求体通过 `POST /api/tasks` 上传（文件名使用 URL 编码的 `fileName` 查询参数），写入服务器私有目录后再创建 SQLite 排队任务；独立 worker 在服务器上解析和渲染 PDF、调用模型链路、把进度和最终结果写回 SQLite。关闭或刷新浏览器不会中断任务。
 
 - 原始 PDF 仅存放在服务器 `/var/lib/pdf-checker/uploads`，默认上传后保留 72 小时；任务排队或处理中不会被清理。
 - 结果和任务历史保存在 `/var/lib/pdf-checker/data/pdf-checker.sqlite`；渲染页、裁剪图、原始模型响应和 API Key 不会持久化或返回给浏览器。
@@ -93,7 +93,7 @@ sudo ss -ltnp | grep ':3000'
 
 输出应只显示 `127.0.0.1:3000`（如启用 IPv6 loopback，也只能是 `::1:3000`）。
 
-Nginx 使用 `deploy/nginx-pdf-checker.conf`，并保留 `client_max_body_size 25m`，以接受最大 20 MiB 的 PDF 加 multipart 开销。安装或更新 Nginx 配置后执行 `sudo nginx -t`，再重载 Nginx。
+Nginx 使用 `deploy/nginx-pdf-checker.conf`，并保留 `client_max_body_size 25m`，为最大 20 MiB 的原始 PDF 请求体留出明确余量。上传专用 key 只匹配 `POST /api/tasks`：同一来源最多 3 个并发上传，请求速率为每秒 6 个并允许 `burst=12`；空 key 不计数，所以历史/进度 GET 轮询和其他接口不受该限制。安装或更新 Nginx 配置后执行 `sudo nginx -t`，再重载 Nginx。
 
 当前 Nginx 会显式清空入站 `oai-authenticated-user-email`，所以当前配置不支持认证模式；不能只把 `PDF_AUDIT_REQUIRE_AUTH` 改为 `true`。未来可信认证代理必须先完成认证，拒绝或清除客户端伪造的该头，再以代理控制的不可伪造变量覆盖它，同时保持 3000 端口仅 loopback 可见。
 
@@ -179,11 +179,13 @@ sudo systemctl restart pdf-checker-worker.service
 重命名回 `/opt/pdf-checker/current` 后再启动旧服务。后续 `current` 已是 symlink 的
 发布或回滚均用同一脚本指向已验证的旧 commit。
 
-`client_max_body_size 25m` 只负责上传体积上限；当前应用在 multipart 输入流上逐块计数，
-不会先复制一份完整请求体。但原生 `Request.formData()` 仍会保留解析后的 `File`，随后
-PDF 校验还会执行一次 `File.arrayBuffer()`，所以单请求内存仍受 25 MiB 上限约束，并非
-直接流式落盘。将来如对公网开放，应在 Nginx 或受信任代理上额外配置
-rate/connection limit，而不是依赖应用进程的单机队列。
+`client_max_body_size 25m` 只负责代理层上传体积上限。浏览器直接发送
+`application/pdf` 原始请求体，不再构造 multipart；因此 vinext 不会把上传误判为
+progressive Server Action，也不会额外执行 `request.clone()`、`formData()` 或保留一个
+解析后的 `File`。应用的有界读取器逐块计数，最多保留输入 chunks 和一份连续
+`Uint8Array`，峰值约 2 倍 20 MiB payload 加运行时开销，然后才校验 `%PDF-` 并写入
+UUID 命名的私有文件；这仍不是直接流式落盘。Nginx 已只对 `POST /api/tasks` 配置
+同源 3 个并发连接以及 `6r/s`、`burst=12` 的请求限制，不会占用 GET 轮询额度。
 
 ### 首次目录迁移的人工回滚
 

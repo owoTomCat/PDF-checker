@@ -14,8 +14,8 @@ import {
 } from "../task-contracts";
 import { RequestGuardError } from "./request-guards";
 import {
-  parseBoundedFormData,
   parseBoundedJson,
+  readBoundedRequestBytes,
   RequestBodyTooLargeError,
 } from "./bounded-request";
 import {
@@ -24,7 +24,7 @@ import {
   deleteTaskPdf,
   persistPdf,
   resolveTaskDataPaths,
-  validatePdfUpload,
+  validatePdfBytes,
 } from "./task-files";
 import { openTaskDatabase } from "./task-database";
 import { InvalidTaskCursorError, TASK_FAILURE_MESSAGES, TaskRepository } from "./task-repository";
@@ -32,7 +32,6 @@ import { taskOwnerFromRequest } from "./task-owner";
 
 export const DEFAULT_PDF_RETENTION_HOURS = 72;
 const MAX_PDF_RETENTION_HOURS = 8_760;
-export const MAX_TASK_UPLOAD_BODY_BYTES = MAX_PDF_BYTES + 1024 * 1024;
 export const MAX_LEGACY_IMPORT_BODY_BYTES = 1_310_720;
 export const MAX_BATCH_DELETE_BODY_BYTES = 64 * 1024;
 
@@ -109,8 +108,25 @@ function isTerminal(status: string): boolean {
 
 function safeUploadedFileName(name: string): string {
   const normalized = name.replace(/^.*[\\/]/, "").trim();
-  if (!normalized || normalized.length > 255) throw invalidInput();
+  if (
+    !normalized ||
+    normalized.length > 255 ||
+    /[\u0000-\u001f\u007f]/.test(normalized)
+  ) {
+    throw invalidInput();
+  }
   return normalized;
+}
+
+function rawPdfFileName(request: Request): string {
+  const values = new URL(request.url).searchParams.getAll("fileName");
+  if (values.length !== 1) throw invalidInput();
+  return safeUploadedFileName(values[0]);
+}
+
+function isRawPdfRequest(request: Request): boolean {
+  const contentType = request.headers.get("content-type");
+  return contentType?.split(";", 1)[0]?.trim().toLowerCase() === "application/pdf";
 }
 
 function isPrivatePdfPath(pdfPath: string, dataDir: string): boolean {
@@ -146,12 +162,8 @@ export class TaskApi {
     let committed = false;
     try {
       const ownerEmail = taskOwnerFromRequest(request, this.env);
-      const form = await this.requestFormData(request);
-      const values = form.getAll("pdf");
-      if (values.length !== 1 || !(values[0] instanceof File)) throw invalidInput();
-      const file = values[0];
-      const fileName = safeUploadedFileName(file.name);
-      const bytes = await validatePdfUpload(file);
+      const fileName = rawPdfFileName(request);
+      const bytes = await this.requestPdfBytes(request);
       const id = this.createId();
       pdfPath = await persistPdf({ dataDir: this.dataDir, taskId: id, bytes });
       const now = new Date();
@@ -159,8 +171,8 @@ export class TaskApi {
         id,
         ownerEmail,
         fileName,
-        fileSize: file.size,
-        fileType: file.type || null,
+        fileSize: bytes.byteLength,
+        fileType: "application/pdf",
         pdfPath,
         pdfExpiresAt: new Date(
           now.getTime() + this.pdfRetentionHours * 60 * 60 * 1_000,
@@ -297,12 +309,19 @@ export class TaskApi {
     return summary;
   }
 
-  private async requestFormData(request: Request): Promise<FormData> {
+  private async requestPdfBytes(request: Request): Promise<Uint8Array> {
+    if (!isRawPdfRequest(request)) throw invalidInput();
     try {
-      return await parseBoundedFormData(request, MAX_TASK_UPLOAD_BODY_BYTES);
+      return validatePdfBytes(await readBoundedRequestBytes(request, MAX_PDF_BYTES));
     } catch (error) {
-      if (error instanceof RequestBodyTooLargeError) throw requestTooLarge();
-      throw invalidInput();
+      if (error instanceof RequestBodyTooLargeError) {
+        throw new TaskApiError(
+          "PDF_TOO_LARGE",
+          413,
+          TASK_FAILURE_MESSAGES.PDF_TOO_LARGE,
+        );
+      }
+      throw error;
     }
   }
 

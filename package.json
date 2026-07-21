@@ -14,7 +14,7 @@
     "start:worker": "node dist/audit-worker.mjs",
     "test": "npm run test:unit && npm run build && npm run test:source",
     "test:unit": "node --import tsx --test tests/*.test.ts",
-    "test:source": "node --test tests/rendered-html.test.mjs tests/client-artifact.test.mjs tests/activate-release.test.mjs tests/production-upload.test.mjs",
+    "test:source": "node --test tests/rendered-html.test.mjs tests/client-artifact.test.mjs tests/activate-release.test.mjs tests/deployment-config.test.mjs tests/production-upload.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },

@@ -30,16 +30,26 @@ function authenticatedRequest(url: string, init: RequestInit = {}) {
   });
 }
 
+function rawPdfRequest(
+  fileName: string,
+  body: BodyInit = "%PDF-1.7\nbody",
+  contentType = "application/pdf",
+) {
+  return authenticatedRequest(
+    `https://pdf.example/api/tasks?fileName=${encodeURIComponent(fileName)}`,
+    {
+      method: "POST",
+      headers: { "content-type": contentType },
+      body,
+    },
+  );
+}
+
 async function createUploadedTask(
   api: ReturnType<typeof createTaskApiForDataDir>,
   id?: string,
 ) {
-  const form = new FormData();
-  form.set("pdf", new File(["%PDF-1.7\nbody"], "case.pdf", { type: "application/pdf" }));
-  const response = await api.create(authenticatedRequest("https://pdf.example/api/tasks", {
-    method: "POST",
-    body: form,
-  }));
+  const response = await api.create(rawPdfRequest("case.pdf"));
   assert.equal(response.status, 202);
   const task = await response.json() as { id: string };
   if (id) assert.equal(task.id, id);
@@ -110,6 +120,30 @@ test("upload becomes durable before returning 202", async (t) => {
   assert.equal(task?.pdfAvailable, true);
 });
 
+test("raw upload preserves a Unicode filename while persisting to a private UUID path", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-unicode-upload-"));
+  const taskId = "ace916b4-7297-4f7f-aac5-2e6e84de2032";
+  const api = createTaskApiForDataDir(root, {
+    requireAuth: true,
+    createId: () => taskId,
+  });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const response = await api.create(rawPdfRequest(
+    "上海 外网溯源报告.pdf",
+    "%PDF-1.7\nbody",
+    "Application/PDF; profile=archive",
+  ));
+
+  assert.equal(response.status, 202);
+  const summary = await response.json() as { fileName: string; fileSize: number };
+  assert.equal(summary.fileName, "上海 外网溯源报告.pdf");
+  assert.equal(summary.fileSize, new TextEncoder().encode("%PDF-1.7\nbody").byteLength);
+  const stored = api.repository.getOwnedWorker("owner@example.com", taskId);
+  assert.equal(path.basename(stored!.pdfPath!), `${taskId}.pdf`);
+});
+
 test("PDF retention hours defaults to 72 and rejects unsafe deployment values", () => {
   assert.equal(parsePdfRetentionHours(undefined), 72);
   assert.equal(parsePdfRetentionHours("24"), 24);
@@ -144,10 +178,38 @@ test("rejects an overlong public filename before creating file artifacts", async
   const api = createTaskApiForDataDir(root, { requireAuth: true });
   t.after(() => api.dispose());
   t.after(() => rm(root, { recursive: true, force: true }));
-  const form = new FormData();
-  form.set("pdf", new File(["%PDF-1.7\nbody"], `${"a".repeat(256)}.pdf`, { type: "application/pdf" }));
-  const response = await api.create(authenticatedRequest("https://pdf.example/api/tasks", { method: "POST", body: form }));
+  const response = await api.create(rawPdfRequest(`${"a".repeat(256)}.pdf`));
   assert.equal(response.status, 422);
+  assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
+  await assert.rejects(access(path.join(root, "uploads")));
+});
+
+test("raw upload rejects missing or duplicate filenames, invalid media types, and invalid magic", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-raw-invalid-"));
+  const api = createTaskApiForDataDir(root, { requireAuth: true });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const requests = [
+    authenticatedRequest("https://pdf.example/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/pdf" },
+      body: "%PDF-1.7\nbody",
+    }),
+    authenticatedRequest("https://pdf.example/api/tasks?fileName=one.pdf&fileName=two.pdf", {
+      method: "POST",
+      headers: { "content-type": "application/pdf" },
+      body: "%PDF-1.7\nbody",
+    }),
+    rawPdfRequest("case.pdf", "%PDF-1.7\nbody", "application/octet-stream"),
+    rawPdfRequest("case.pdf", "not a pdf"),
+  ];
+
+  for (const request of requests) {
+    const response = await api.create(request);
+    assert.equal(response.status, 422);
+    assert.match(response.headers.get("content-type") ?? "", /^application\/json\b/);
+  }
   assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
   await assert.rejects(access(path.join(root, "uploads")));
 });
@@ -157,18 +219,19 @@ test("task upload enforces its body cap for chunked and dishonest content length
   const api = createTaskApiForDataDir(root, { requireAuth: true });
   t.after(() => api.dispose());
   t.after(() => rm(root, { recursive: true, force: true }));
-  const oversized = new Uint8Array(MAX_PDF_BYTES + 1024 * 1024 + 1);
+  const oversized = new Uint8Array(MAX_PDF_BYTES + 1);
+  oversized.set(new TextEncoder().encode("%PDF-"));
 
   for (const contentLength of [undefined, "1"]) {
-    const response = await api.create(streamedRequest("https://pdf.example/api/tasks", {
+    const response = await api.create(streamedRequest("https://pdf.example/api/tasks?fileName=large.pdf", {
       method: "POST",
-      headers: { "content-type": "multipart/form-data; boundary=cap" },
+      headers: { "content-type": "application/pdf" },
       chunks: [oversized],
       contentLength,
     }));
     assert.equal(response.status, 413);
     assert.deepEqual(await response.json(), {
-      error: { code: "REQUEST_TOO_LARGE", message: "The task request is too large." },
+      error: { code: "PDF_TOO_LARGE", message: "The PDF exceeds the supported size limit." },
     });
   }
   assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
@@ -447,9 +510,7 @@ test("pending deletion survives unlink failure and cleanup retries it", async (t
   const pdfPath = path.join(root, "uploads", `${taskId}.pdf`);
 
   api.repository.claimOrphanPdfDeletion(pdfPath, new Date().toISOString());
-  const form = new FormData();
-  form.set("pdf", new File(["%PDF-1.7\nbody"], "case.pdf", { type: "application/pdf" }));
-  const rollback = await api.create(authenticatedRequest("https://pdf.example/api/tasks", { method: "POST", body: form }));
+  const rollback = await api.create(rawPdfRequest("case.pdf"));
   assert.equal(rollback.status, 500);
   assert.doesNotMatch(JSON.stringify(await rollback.json()), /private|uploads/i);
   assert.equal(api.repository.getOwned("owner@example.com", taskId), null);

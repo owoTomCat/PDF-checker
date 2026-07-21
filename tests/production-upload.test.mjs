@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -55,6 +55,8 @@ async function stopChild(child) {
 }
 
 test("production server admits a 20 MiB PDF and preserves the application file limit", async () => {
+  const builtServer = await readFile(path.join(projectRoot, "dist", "server", "index.js"), "utf8");
+  assert.match(builtServer, /var __MAX_ACTION_BODY_SIZE = 1048576;/);
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-production-upload-"));
   const port = await reservePort();
   let diagnostics = "";
@@ -88,20 +90,27 @@ test("production server admits a 20 MiB PDF and preserves the application file l
 
     const pdfBytes = new Uint8Array(20 * 1024 * 1024);
     pdfBytes.set(new TextEncoder().encode("%PDF-1.7\n"));
-    const form = new FormData();
-    form.append("pdf", new File([pdfBytes], "maximum.pdf", { type: "application/pdf" }));
+    const uploadUrl = `${tasksUrl}?fileName=${encodeURIComponent("最大 文件.pdf")}`;
 
-    const response = await fetch(tasksUrl, { method: "POST", body: form });
+    const response = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf" },
+      body: new File([pdfBytes], "maximum.pdf", { type: "application/pdf" }),
+    });
     assert.equal(response.status, 202);
     const task = await response.json();
     assert.equal(task.status, "queued");
+    assert.equal(task.fileName, "最大 文件.pdf");
 
-    const oversizedForm = new FormData();
-    oversizedForm.append(
-      "pdf",
-      new File([pdfBytes, new Uint8Array(1)], "oversized.pdf", { type: "application/pdf" }),
-    );
-    const oversizedResponse = await fetch(tasksUrl, { method: "POST", body: oversizedForm });
+    const oversizedResponse = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf" },
+      body: new File(
+        [pdfBytes, new Uint8Array(1)],
+        "oversized.pdf",
+        { type: "application/pdf" },
+      ),
+    });
     assert.equal(oversizedResponse.status, 413);
     assert.match(oversizedResponse.headers.get("content-type") ?? "", /^application\/json\b/);
     const oversizedError = await oversizedResponse.json();

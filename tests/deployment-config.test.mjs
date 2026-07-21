@@ -88,6 +88,25 @@ test("nginx and operations documentation preserve upload, installation, and secr
   const documentation = `${readme}\n${deploymentDesign}\n${implementationPlan}`;
 
   assert.match(nginx, /^\s*client_max_body_size\s+25m;$/m);
+  const uploadMap = nginx.match(
+    /map\s+"\$request_method:\$uri"\s+\$pdf_upload_limit_key\s*\{([\s\S]*?)\}/,
+  );
+  assert.ok(uploadMap, "Nginx must derive an upload-only rate/connection key");
+  assert.match(uploadMap[1], /^\s*default\s+"";$/m);
+  assert.match(uploadMap[1], /^\s*"POST:\/api\/tasks"\s+\$binary_remote_addr;$/m);
+  assert.doesNotMatch(uploadMap[1], /GET:|\/api\/audit|batch-delete|\/retry/);
+  assert.match(
+    nginx,
+    /^\s*limit_conn_zone\s+\$pdf_upload_limit_key\s+zone=pdf_upload_conn:10m;$/m,
+  );
+  assert.match(
+    nginx,
+    /^\s*limit_req_zone\s+\$pdf_upload_limit_key\s+zone=pdf_upload_rate:10m\s+rate=6r\/s;$/m,
+  );
+  assert.match(nginx, /^\s*limit_conn\s+pdf_upload_conn\s+3;$/m);
+  assert.match(nginx, /^\s*limit_conn_status\s+429;$/m);
+  assert.match(nginx, /^\s*limit_req\s+zone=pdf_upload_rate\s+burst=12\s+nodelay;$/m);
+  assert.match(nginx, /^\s*limit_req_status\s+429;$/m);
   assert.match(nginx, /^\s*proxy_set_header\s+oai-authenticated-user-email\s+"";$/m);
   assert.match(launcher, /--hostname[\s\S]*127\.0\.0\.1/);
   assert.doesNotMatch(launcher, /\.\.\.process\.argv\.slice\(3\)/);
@@ -118,6 +137,11 @@ test("nginx and operations documentation preserve upload, installation, and secr
   assert.match(documentation, /sqlite3[^\n]*\.backup|systemctl stop[^\n]*pdf-checker/);
   assert.match(documentation, /not acceptable for a public or multi-user deployment|不适用于公开或多用户部署/i);
   assert.match(documentation, /dist\/audit-worker\.mjs/);
+  assert.match(readme, /application\/pdf/);
+  assert.match(readme, /约\s*2\s*倍\s*20 MiB/);
+  assert.match(readme, /vinext/i);
+  assert.match(readme, /3\s*个.*并发上传|并发上传.*3\s*个/s);
+  assert.doesNotMatch(readme, /当前应用在 multipart 输入流上/);
   for (const source of [readme, deploymentDesign, implementationPlan]) {
     let previous = -1;
     for (const command of [

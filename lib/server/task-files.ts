@@ -92,10 +92,6 @@ function hasPdfMagic(bytes: Uint8Array): boolean {
   return bytes.length >= PDF_MAGIC.length && PDF_MAGIC.every((byte, index) => bytes[index] === byte);
 }
 
-function isPdfUpload(file: File): boolean {
-  return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-}
-
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
@@ -122,17 +118,13 @@ async function ensureUploadDir(
   }
 }
 
-export async function validatePdfUpload(file: File): Promise<Uint8Array> {
-  if (!(file instanceof File) || !isPdfUpload(file)) {
-    throw new TaskFileError("INVALID_PDF_UPLOAD", "仅支持 PDF 文件。");
-  }
-  if (file.size === 0) {
+export function validatePdfBytes(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength === 0) {
     throw new TaskFileError("INVALID_PDF_UPLOAD", "PDF 文件为空。");
   }
-  if (file.size > MAX_PDF_BYTES) {
+  if (bytes.byteLength > MAX_PDF_BYTES) {
     throw new TaskFileError("PDF_TOO_LARGE", "PDF 文件超过 20 MiB 限制。");
   }
-  const bytes = new Uint8Array(await file.arrayBuffer());
   if (!hasPdfMagic(bytes)) {
     throw new TaskFileError("INVALID_PDF_UPLOAD", "PDF 文件内容无效。");
   }

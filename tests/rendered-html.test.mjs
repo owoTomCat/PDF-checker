@@ -126,6 +126,7 @@ test("defines the strict Qwen PDF audit workspace UI and metadata", async () => 
   assert.doesNotMatch(consoleSource, /runAuditFromPdf/);
   assert.doesNotMatch(consoleSource, /PDF 不会上传到服务器/);
   assert.match(taskHookSource + taskApiSource, /\/api\/tasks/);
+  assert.doesNotMatch(taskApiSource, /FormData/);
   assert.doesNotMatch(page + layout + consoleSource, /codex-preview|react-loading-skeleton/);
 });
 

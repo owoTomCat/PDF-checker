@@ -45,16 +45,22 @@ function detail(overrides: Partial<AuditTaskDetail> = {}): AuditTaskDetail {
 test("upload sends the original PDF once and parses the queued response", async () => {
   let capturedUrl = "";
   let captured: RequestInit | undefined;
-  const file = new File(["%PDF-1.7\nbody"], "case.pdf", { type: "application/pdf" });
+  const file = new File(["%PDF-1.7\nbody"], "上海 报告（终）.pdf", {
+    type: "application/pdf",
+  });
   const task = await uploadTask(file, async (url, init) => {
     capturedUrl = String(url);
     captured = init;
     return Response.json(summary(), { status: 202 });
   });
 
-  assert.equal(capturedUrl, "/api/tasks");
+  const url = new URL(capturedUrl, "https://example.invalid");
+  assert.equal(url.pathname, "/api/tasks");
+  assert.equal(url.searchParams.get("fileName"), file.name);
   assert.equal(captured?.method, "POST");
-  assert.equal((captured?.body as FormData).get("pdf"), file);
+  assert.equal(new Headers(captured?.headers).get("content-type"), "application/pdf");
+  assert.equal(captured?.body, file);
+  assert.equal(captured?.body instanceof FormData, false);
   assert.equal(task.status, "queued");
 });
 
