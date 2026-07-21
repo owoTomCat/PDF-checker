@@ -57,6 +57,57 @@ export const AuditTaskDetailSchema = AuditTaskSummarySchema.extend({
   report: StrictAuditReportSchema.nullable(),
 });
 
+const LegacyCompletedTaskSchema = AuditTaskDetailSchema.extend({
+  status: z.literal("completed"),
+  outcome: z.enum(["passed", "issues_found", "needs_review"]),
+  model: z.literal("qwen3.7-plus"),
+  progress: z.literal(100),
+  completedAt: z.iso.datetime(),
+  errorCode: z.null(),
+  errorMessage: z.null(),
+  issueCount: z.number().int().nonnegative(),
+  summary: StrictExtractionSummarySchema,
+  reportText: z.string().max(1_000_000),
+  report: StrictAuditReportSchema,
+}).superRefine((task, context) => {
+  if (task.issueCount !== task.report.issues.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["issueCount"],
+      message: "Completed legacy tasks must retain the final issue count.",
+    });
+  }
+  if (
+    task.processedPages !== task.summary.pageCount ||
+    task.totalPages !== task.summary.pageCount
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["processedPages"],
+      message: "Completed legacy tasks must retain the final page count.",
+    });
+  }
+});
+
+const LegacyFailedTaskSchema = AuditTaskDetailSchema.extend({
+  status: z.literal("failed"),
+  outcome: z.literal("failed"),
+  model: z.null(),
+  progress: z.literal(100),
+  completedAt: z.iso.datetime(),
+  errorCode: z.string().min(1).max(100),
+  errorMessage: z.string().min(1).max(2_000),
+  issueCount: z.null(),
+  summary: z.null(),
+  reportText: z.null(),
+  report: z.null(),
+});
+
+export const LegacyTaskImportItemSchema = z.discriminatedUnion("status", [
+  LegacyCompletedTaskSchema,
+  LegacyFailedTaskSchema,
+]);
+
 export const TaskListQuerySchema = z.object({
   query: z.string().trim().max(200).optional(),
   createdFrom: z.iso.datetime().optional(),
@@ -71,14 +122,8 @@ export const TaskListQuerySchema = z.object({
 }));
 
 export const TaskImportRequestSchema = z.object({
-  tasks: z.array(AuditTaskDetailSchema).max(80),
-}).refine(
-  ({ tasks }) =>
-    tasks.every(
-      (task) => task.status === "completed" || task.status === "failed",
-    ),
-  "Only completed or failed tasks can be imported.",
-);
+  tasks: z.array(LegacyTaskImportItemSchema).max(80),
+});
 
 export const BatchDeleteRequestSchema = z.object({
   ids: z.array(z.string().min(1).max(100)).min(1).max(101),

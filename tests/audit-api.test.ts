@@ -6,6 +6,7 @@ import { POST as finalizeAudit } from "../app/api/audit/finalize/route";
 import { POST as locateRegions } from "../app/api/audit/layout/route";
 import { POST as recognizeEvidence } from "../app/api/audit/recognize-evidence/route";
 import { POST as reviewUrls } from "../app/api/audit/review-url/route";
+import { MAX_MODEL_MULTIPART_BODY_BYTES } from "../lib/server/image-input";
 import {
   strictAssociation,
   strictEvidence,
@@ -676,6 +677,28 @@ test("layout API rejects an oversized declared body before multipart parsing", a
       },
       body: "oversized-body-placeholder",
     }),
+  );
+
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error.code, "BATCH_TOO_LARGE");
+});
+
+test("layout API bounds a chunked multipart body even when Content-Length is absent", async () => {
+  const response = await locateRegions(
+    new Request("https://audit.example.com/api/audit/layout", {
+      method: "POST",
+      headers: {
+        origin: "https://audit.example.com",
+        "content-type": "multipart/form-data; boundary=cap",
+      },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(MAX_MODEL_MULTIPART_BODY_BYTES + 1));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    } as RequestInit & { duplex: "half" }),
   );
 
   assert.equal(response.status, 413);

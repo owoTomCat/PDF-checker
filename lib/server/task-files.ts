@@ -33,6 +33,7 @@ export type CleanupRepository = {
   findExpiredPdfTasks: (now: string) => Array<{ id: string; pdfPath: string | null }>;
   markPdfDeleted: (id: string, now: string) => boolean;
   claimOrphanPdfDeletion: (pdfPath: string, now: string) => boolean;
+  releaseOrphanPdfDeletionClaim: (pdfPath: string) => void;
   findPendingPdfDeletions: () => string[];
   markPendingPdfDeleted: (pdfPath: string) => void;
 };
@@ -211,7 +212,21 @@ async function removeStaleFiles(input: {
       continue;
     }
     if (isUuidPdfFileName(entry.name) && input.repository.claimOrphanPdfDeletion(candidate, input.now)) {
-      await deleteTaskPdf(candidate, input.uploadDir, input.operations);
+      let deletionError: unknown;
+      try {
+        await deleteTaskPdf(candidate, input.uploadDir, input.operations);
+      } catch (error) {
+        deletionError = error;
+      }
+      try {
+        input.repository.releaseOrphanPdfDeletionClaim(candidate);
+      } catch {
+        throw new TaskFileError(
+          "ORPHAN_CLAIM_RELEASE_FAILED",
+          "无法清理 PDF 存储。",
+        );
+      }
+      if (deletionError) throw deletionError;
       deletedOrphanPdfs += 1;
     }
   }
@@ -239,9 +254,13 @@ export async function cleanupTaskFiles(input: {
   for (const task of input.repository.findExpiredPdfTasks(input.now)) {
     if (task.pdfPath === null) continue;
     if (!isInsideUploadDir(task.pdfPath, uploadDir)) continue;
-    if (!input.repository.markPdfDeleted(task.id, input.now)) continue;
-    await deleteTaskPdf(task.pdfPath, uploadDir, operations);
-    deletedTaskPdfs += 1;
+    try {
+      await deleteTaskPdf(task.pdfPath, uploadDir, operations);
+    } catch {
+      // Keep the DB reference when the file was not removed so a later cleanup can retry.
+      continue;
+    }
+    if (input.repository.markPdfDeleted(task.id, input.now)) deletedTaskPdfs += 1;
   }
   const stale = await removeStaleFiles({
     repository: input.repository,

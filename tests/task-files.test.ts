@@ -239,6 +239,131 @@ test("cleanup treats a disappearing stale candidate as idempotent", async (t) =>
   });
 });
 
+test("cleanup releases an orphan claim after an unlink failure so the next pass can delete it", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-orphan-claim-retry-"));
+  const db = openTaskDatabase(root);
+  const repository = new TaskRepository(db);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { uploadDir } = resolveTaskDataPaths(root);
+  await defaultTaskFileOperations.mkdir(uploadDir, { recursive: true, mode: 0o700 });
+  const orphanPath = path.join(uploadDir, `${orphanId}.pdf`);
+  await writeFile(orphanPath, "%PDF-orphan", { mode: 0o600 });
+  await utimes(orphanPath, new Date("2026-07-19T22:00:00.000Z"), new Date("2026-07-19T22:00:00.000Z"));
+
+  await assert.rejects(
+    cleanupTaskFiles({
+      repository,
+      dataDir: root,
+      now: cleanupNow,
+      fileOperations: {
+        ...defaultTaskFileOperations,
+        unlink: async () => {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        },
+      },
+    }),
+    (error: unknown) => (error as { code?: string }).code === "PDF_DELETE_FAILED",
+  );
+
+  const claimAfterFailure = db.prepare(
+    "SELECT COUNT(*) AS count FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
+  ).get(orphanPath) as { count: number };
+  assert.equal(claimAfterFailure.count, 0);
+
+  const secondPass = await cleanupTaskFiles({ repository, dataDir: root, now: cleanupNow });
+  assert.equal(secondPass.deletedOrphanPdfs, 1);
+  await assert.rejects(access(orphanPath));
+  const claimAfterSuccess = db.prepare(
+    "SELECT COUNT(*) AS count FROM pdf_orphan_deletion_claims WHERE pdf_path = ?",
+  ).get(orphanPath) as { count: number };
+  assert.equal(claimAfterSuccess.count, 0);
+});
+
+test("cleanup surfaces an orphan-claim release failure ahead of the stale-file failure", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-orphan-release-failure-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { uploadDir } = resolveTaskDataPaths(root);
+  await defaultTaskFileOperations.mkdir(uploadDir, { recursive: true, mode: 0o700 });
+  const orphanPath = path.join(uploadDir, `${orphanId}.pdf`);
+  await writeFile(orphanPath, "%PDF-orphan", { mode: 0o600 });
+  await utimes(orphanPath, new Date("2026-07-19T22:00:00.000Z"), new Date("2026-07-19T22:00:00.000Z"));
+  let releases = 0;
+
+  await assert.rejects(
+    cleanupTaskFiles({
+      repository: {
+        findExpiredPdfTasks() { return []; },
+        markPdfDeleted() { return false; },
+        claimOrphanPdfDeletion() { return true; },
+        releaseOrphanPdfDeletionClaim() {
+          releases += 1;
+          throw new Error("database unavailable");
+        },
+        findPendingPdfDeletions() { return []; },
+        markPendingPdfDeleted() {},
+      },
+      dataDir: root,
+      now: cleanupNow,
+      fileOperations: {
+        ...defaultTaskFileOperations,
+        unlink: async () => {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        },
+      },
+    }),
+    (error: unknown) => (error as { code?: string }).code === "ORPHAN_CLAIM_RELEASE_FAILED",
+  );
+  assert.equal(releases, 1);
+  await access(orphanPath);
+});
+
+test("cleanup retains an expired terminal task reference when unlink fails and retries later", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-expired-retry-"));
+  const db = openTaskDatabase(root);
+  const repository = new TaskRepository(db);
+  t.after(() => db.close());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const pdfPath = await persistPdf({
+    dataDir: root,
+    taskId: terminalId,
+    bytes: new TextEncoder().encode("%PDF-terminal"),
+  });
+  repository.create({
+    id: terminalId,
+    ownerEmail: "a@example.com",
+    fileName: "terminal.pdf",
+    fileSize: 10,
+    fileType: "application/pdf",
+    pdfPath,
+    pdfExpiresAt: expiredAt,
+    now: "2026-07-16T00:00:00.000Z",
+  });
+  repository.fail({ id: terminalId, errorCode: "PDF_INVALID", now: "2026-07-16T00:01:00.000Z" });
+
+  const failedPass = await cleanupTaskFiles({
+    repository,
+    dataDir: root,
+    now: cleanupNow,
+    fileOperations: {
+      ...defaultTaskFileOperations,
+      unlink: async () => {
+        throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      },
+    },
+  });
+  assert.equal(failedPass.deletedTaskPdfs, 0);
+  const retained = repository.getOwnedWorker("a@example.com", terminalId);
+  assert.equal(retained?.pdfPath, pdfPath);
+  assert.equal(repository.findExpiredPdfTasks(cleanupNow).map((task) => task.id).includes(terminalId), true);
+  await access(pdfPath);
+
+  const successfulPass = await cleanupTaskFiles({ repository, dataDir: root, now: cleanupNow });
+  assert.equal(successfulPass.deletedTaskPdfs, 1);
+  assert.equal(repository.getOwnedWorker("a@example.com", terminalId)?.pdfPath, null);
+  await assert.rejects(access(pdfPath));
+});
+
 test("storage setup and stale stat failures have path-free public errors", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-safe-errors-"));
   const db = openTaskDatabase(root);

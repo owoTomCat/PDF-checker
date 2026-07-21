@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildFinalAuditResult } from "../lib/audit-result";
 import {
   AuditTaskDetailSchema,
   BatchDeleteRequestSchema,
   TaskImportRequestSchema,
   TaskListQuerySchema,
 } from "../lib/task-contracts";
+import { strictFinalizeRequest } from "./strict-fixtures";
+
+const finalResult = buildFinalAuditResult(strictFinalizeRequest);
 
 test("task list query bounds pagination and normalizes filters", () => {
   assert.deepEqual(
@@ -57,11 +61,38 @@ test("legacy import accepts terminal tasks only", () => {
   const completed = {
     ...queued,
     status: "completed",
-    outcome: "passed",
+    outcome: finalResult.outcome,
+    model: finalResult.model,
     progress: 100,
+    processedPages: finalResult.summary.pageCount,
+    totalPages: finalResult.summary.pageCount,
     completedAt: "2026-07-20T00:01:00.000Z",
+    issueCount: finalResult.report.issues.length,
+    summary: finalResult.summary,
+    reportText: finalResult.reportText,
+    report: finalResult.report,
   };
   assert.deepEqual(TaskImportRequestSchema.parse({ tasks: [completed] }), {
     tasks: [completed],
   });
+  assert.throws(() => TaskImportRequestSchema.parse({
+    tasks: [{ ...completed, summary: null, reportText: null, report: null, issueCount: null }],
+  }));
+  assert.throws(() => TaskImportRequestSchema.parse({
+    tasks: [{ ...completed, issueCount: completed.issueCount + 1 }],
+  }));
+  assert.throws(() => TaskImportRequestSchema.parse({
+    tasks: [{ ...completed, processedPages: completed.processedPages - 1 }],
+  }));
+  assert.deepEqual(TaskImportRequestSchema.parse({
+    tasks: [{
+      ...queued,
+      status: "failed",
+      outcome: "failed",
+      progress: 100,
+      completedAt: "2026-07-20T00:01:00.000Z",
+      errorCode: "PDF_INVALID",
+      errorMessage: "The PDF could not be processed.",
+    }],
+  }).tasks[0]?.status, "failed");
 });

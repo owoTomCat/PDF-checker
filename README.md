@@ -155,3 +155,30 @@ sudo systemctl restart pdf-checker-worker.service
 - [百炼结构化输出](https://help.aliyun.com/zh/model-studio/qwen-structured-output)
 - [PDF.js API](https://mozilla.github.io/pdf.js/api/draft/module-pdfjsLib.html)
 - [Node SQLite API](https://nodejs.org/docs/latest-v24.x/api/sqlite.html)
+
+## 原子发布与首次目录迁移
+
+发布目录固定为 `/opt/pdf-checker/releases/<commit>`，运行入口为
+`/opt/pdf-checker/current`。不要再用 `ln -sfn` 覆盖一个可能仍是普通目录的
+`current`。在新 release 已完成 `npm ci`、`npm run build` 且包含
+`dist/audit-worker.mjs` 后，按下面顺序切换：
+
+```bash
+sudo systemctl stop pdf-checker-worker.service
+sudo systemctl stop pdf-checker.service
+sudo bash "/opt/pdf-checker/releases/$commit/deploy/activate-release.sh" "$commit"
+sudo systemctl daemon-reload
+sudo systemctl restart pdf-checker.service
+sudo systemctl restart pdf-checker-worker.service
+```
+
+脚本只接受受控的 release commit，使用与 `current` 同一父目录的临时链接，再以
+原子 rename 切换。首次遇到普通 `current` 目录时，会先重命名为
+`.current.pre-symlink.*`；在服务、Nginx 和本地 HTTP 健康检查全部通过前必须保留该
+目录。如果切换或服务重启失败，先停止 worker、再停止 web，把这个 rollback 目录
+重命名回 `/opt/pdf-checker/current` 后再启动旧服务。后续 `current` 已是 symlink 的
+发布或回滚均用同一脚本指向已验证的旧 commit。
+
+`client_max_body_size 25m` 只负责上传体积上限；当前应用还在接口层执行流式体积限制。
+将来如对公网开放，应在 Nginx 或受信任代理上额外配置 rate/connection limit，而不是
+依赖应用进程的单机队列。

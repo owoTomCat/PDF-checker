@@ -59,6 +59,7 @@ function makeTestWorker(options: {
   useDefaultPdfReader?: boolean;
   logger?: { error: (message: string, context: Record<string, unknown>) => void };
   failTask?: (input: { id: string; errorCode: string }) => Promise<void> | void;
+  destroy?: (taskId: string) => Promise<void>;
 }) {
   const dataDir = path.join(os.tmpdir(), "pdf-checker-worker-data");
   const tasks = options.tasks ?? Array.from(
@@ -115,6 +116,7 @@ function makeTestWorker(options: {
     claimOrphanPdfDeletion() {
       return false;
     },
+    releaseOrphanPdfDeletionClaim() {},
     findPendingPdfDeletions() {
       return [];
     },
@@ -149,6 +151,7 @@ function makeTestWorker(options: {
           return new Blob();
         },
         async destroy() {
+          await options.destroy?.(taskId);
           destroyedTaskIds.push(taskId);
         },
       };
@@ -364,6 +367,36 @@ test("abort prevents new claims and stop waits for the current task", async () =
   release();
   await Promise.all([running, stopping]);
   assert.equal(harness.claimCount, 1);
+});
+
+test("worker stop waits for a delayed PDF destroy after a completed task", async () => {
+  const controller = new AbortController();
+  let releaseDestroy!: () => void;
+  let destroyStarted = false;
+  const harness = makeTestWorker({
+    concurrency: 1,
+    queuedTaskCount: 1,
+    async destroy() {
+      destroyStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseDestroy = resolve;
+      });
+    },
+  });
+
+  const running = harness.worker.start(controller.signal);
+  await waitFor(() => destroyStarted);
+  controller.abort("SIGTERM");
+  let stopped = false;
+  const stopping = harness.worker.stop().then(() => {
+    stopped = true;
+  });
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  assert.equal(stopped, false);
+  releaseDestroy();
+  await Promise.all([running, stopping]);
+  assert.deepEqual(harness.completedTaskIds, ["task-1"]);
+  assert.deepEqual(harness.destroyedTaskIds, ["task-1"]);
 });
 
 test("cooperative stop forwards its signal, requeues the active claim, and does not fail it", async () => {
@@ -596,6 +629,7 @@ test("worker rejects a private-upload symlink that resolves outside storage", as
       findExpiredPdfTasks() { return []; },
       markPdfDeleted() { return false; },
       claimOrphanPdfDeletion() { return false; },
+      releaseOrphanPdfDeletionClaim() {},
       findPendingPdfDeletions() { return []; },
       markPendingPdfDeleted() {},
     },
@@ -649,6 +683,7 @@ test("default PDF reader passes exact bytes to the opener and closes its handle"
       findExpiredPdfTasks() { return []; },
       markPdfDeleted() { return false; },
       claimOrphanPdfDeletion() { return false; },
+      releaseOrphanPdfDeletionClaim() {},
       findPendingPdfDeletions() { return []; },
       markPendingPdfDeleted() {},
     },

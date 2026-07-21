@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { buildFinalAuditResult } from "../lib/audit-result";
+import { MAX_PDF_BYTES } from "../lib/ai/contracts";
 import { runtime as taskRoutesRuntime } from "../app/api/tasks/route";
 import { runtime as taskRouteRuntime } from "../app/api/tasks/[id]/route";
 import { runtime as retryRouteRuntime } from "../app/api/tasks/[id]/retry/route";
@@ -74,6 +75,28 @@ function terminalLegacyTask(id: string, overrides: Record<string, unknown> = {})
   };
 }
 
+function streamedRequest(
+  url: string,
+  init: RequestInit & { chunks: Uint8Array[]; contentLength?: string },
+) {
+  const headers = new Headers(init.headers);
+  if (init.contentLength !== undefined) headers.set("content-length", init.contentLength);
+  headers.set("origin", "https://pdf.example");
+  headers.set("sec-fetch-site", "same-origin");
+  headers.set("oai-authenticated-user-email", "owner@example.com");
+  return new Request(url, {
+    method: init.method,
+    headers,
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of init.chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    }),
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+}
+
 test("upload becomes durable before returning 202", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-api-"));
   const api = createTaskApiForDataDir(root, { requireAuth: true });
@@ -127,6 +150,46 @@ test("rejects an overlong public filename before creating file artifacts", async
   assert.equal(response.status, 422);
   assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
   await assert.rejects(access(path.join(root, "uploads")));
+});
+
+test("task upload enforces its body cap for chunked and dishonest content lengths", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-upload-cap-"));
+  const api = createTaskApiForDataDir(root, { requireAuth: true });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const oversized = new Uint8Array(MAX_PDF_BYTES + 1024 * 1024 + 1);
+
+  for (const contentLength of [undefined, "1"]) {
+    const response = await api.create(streamedRequest("https://pdf.example/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "multipart/form-data; boundary=cap" },
+      chunks: [oversized],
+      contentLength,
+    }));
+    assert.equal(response.status, 413);
+    assert.deepEqual(await response.json(), {
+      error: { code: "REQUEST_TOO_LARGE", message: "The task request is too large." },
+    });
+  }
+  assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
+});
+
+test("task APIs reject declared oversized bodies before parsing them", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-declared-cap-"));
+  const api = createTaskApiForDataDir(root, { requireAuth: true });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const batch = await api.batchRemove(streamedRequest("https://pdf.example/api/tasks/batch-delete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    chunks: [new TextEncoder().encode("{}")],
+    contentLength: String(64 * 1024 + 1),
+  }));
+  assert.equal(batch.status, 413);
+  assert.deepEqual(await batch.json(), {
+    error: { code: "REQUEST_TOO_LARGE", message: "The task request is too large." },
+  });
 });
 
 test("another owner sees not found instead of task metadata", async (t) => {
@@ -216,8 +279,6 @@ test("legacy import is terminal-only, owner-bound, idempotent, and limited to 80
   t.after(() => rm(root, { recursive: true, force: true }));
   const imported = terminalLegacyTask("legacy-task", {
     fileName: "C:\\private\\legacy.pdf",
-    errorCode: "C:\\private\\legacy.pdf",
-    errorMessage: "C:\\private\\legacy stack trace",
   });
 
   const first = await api.importLegacy(authenticatedRequest("https://pdf.example/api/tasks/import", {
@@ -230,8 +291,8 @@ test("legacy import is terminal-only, owner-bound, idempotent, and limited to 80
   const stored = api.repository.list("owner@example.com", { limit: 80 }).items.find((task) => task.fileName === "legacy.pdf");
   assert.equal(stored?.status, "completed");
   assert.equal(stored?.fileName, "legacy.pdf");
-  assert.equal(stored?.errorCode, "INTERNAL_ERROR");
-  assert.doesNotMatch(stored?.errorMessage ?? "", /private|stack trace/i);
+  assert.equal(stored?.errorCode, null);
+  assert.equal(stored?.errorMessage, null);
 
   const repeat = await api.importLegacy(authenticatedRequest("https://pdf.example/api/tasks/import", {
     method: "POST",
@@ -261,6 +322,44 @@ test("legacy import is terminal-only, owner-bound, idempotent, and limited to 80
     body: JSON.stringify({ tasks: tooMany }),
   }));
   assert.equal(overflow.status, 422);
+});
+
+test("legacy import rejects a completed task without a verified report", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-incomplete-legacy-"));
+  const api = createTaskApiForDataDir(root, { requireAuth: true });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const incomplete = terminalLegacyTask("incomplete-legacy", {
+    summary: null,
+    reportText: null,
+    report: null,
+    issueCount: null,
+  });
+
+  const response = await api.importLegacy(authenticatedRequest("https://pdf.example/api/tasks/import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tasks: [incomplete] }),
+  }));
+  assert.equal(response.status, 422);
+  assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
+});
+
+test("legacy import rejects a forged completed final count", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pdf-checker-forged-legacy-"));
+  const api = createTaskApiForDataDir(root, { requireAuth: true });
+  t.after(() => api.dispose());
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const genuine = terminalLegacyTask("forged-legacy");
+  const forged = { ...genuine, issueCount: genuine.issueCount + 1 };
+
+  const response = await api.importLegacy(authenticatedRequest("https://pdf.example/api/tasks/import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tasks: [forged] }),
+  }));
+  assert.equal(response.status, 422);
+  assert.equal(api.repository.list("owner@example.com", { limit: 80 }).items.length, 0);
 });
 
 test("legacy source IDs are isolated by owner and idempotent per owner", async (t) => {

@@ -1427,8 +1427,9 @@ sudo grep -q '^PDF_AUDIT_PDF_RETENTION_HOURS=72$' /etc/pdf-checker.env
 sudo grep -q '^PDF_AUDIT_WORKER_CONCURRENCY=3$' /etc/pdf-checker.env
 sudo grep -q '^PDF_AUDIT_WORKER_POLL_MS=1000$' /etc/pdf-checker.env
 sudo grep -q '^PDF_AUDIT_SINGLE_TENANT_OWNER=shared-server$' /etc/pdf-checker.env
-sudo ln -sfn "$release" /opt/pdf-checker/current.next
-sudo mv -Tf /opt/pdf-checker/current.next /opt/pdf-checker/current
+sudo systemctl stop pdf-checker-worker.service
+sudo systemctl stop pdf-checker.service
+sudo bash "$release/deploy/activate-release.sh" "$commit"
 sudo systemctl daemon-reload
 sudo systemctl enable pdf-checker.service pdf-checker-worker.service
 sudo systemctl restart pdf-checker.service pdf-checker-worker.service
@@ -1450,7 +1451,7 @@ curl -fsS http://127.0.0.1:3000/ >/dev/null
 readlink -f /opt/pdf-checker/current
 ```
 
-Expected: unit and Nginx verification pass, all services are active, SQLite exists, local HTTP succeeds, and `current` resolves to the published commit.
+Expected: unit and Nginx verification pass, all services are active, SQLite exists, local HTTP succeeds, and `current` resolves to the published commit. If this is the first release migration from a real `/opt/pdf-checker/current` directory, retain the generated `.current.pre-symlink.*` rollback directory until every health check passes. On a failed activation, restore that directory before restarting services; on a later symlink-to-symlink rollout, reactivate the previously verified commit with the same script.
 
 - [ ] **Step 7: Run the deployed browser acceptance flow**
 

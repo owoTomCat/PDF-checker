@@ -7,6 +7,11 @@ import {
 import { AuditGatewayInputError } from "./bailian-audit-gateway";
 import { BailianClientError } from "./bailian-client";
 import { RequestGuardError } from "./request-guards";
+import {
+  parseBoundedFormData,
+  parseBoundedJson,
+  RequestBodyTooLargeError,
+} from "./bounded-request";
 
 export const MAX_MODEL_MULTIPART_BODY_BYTES =
   MAX_BATCH_IMAGE_BYTES + 2 * 1024 * 1024;
@@ -91,8 +96,11 @@ export async function parseImageBatchRequest<T>(
 
   let form: FormData;
   try {
-    form = await request.formData();
-  } catch {
+    form = await parseBoundedFormData(request, MAX_MODEL_MULTIPART_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      throw new RouteInputError("BATCH_TOO_LARGE", 413, "The uploaded data is too large.");
+    }
     throw new RouteInputError(
       "INVALID_INPUT",
       422,
@@ -165,7 +173,17 @@ export async function parseJsonRequest<T>(
     );
   }
 
-  const rawBody = await request.text();
+  let rawBody: string;
+  try {
+    rawBody = JSON.stringify(
+      await parseBoundedJson(request, MAX_MODEL_JSON_BODY_BYTES),
+    );
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      throw new RouteInputError("BODY_TOO_LARGE", 413, "The request body is too large.");
+    }
+    throw new RouteInputError("INVALID_INPUT", 422, "The request body is invalid.");
+  }
   if (
     new TextEncoder().encode(rawBody).byteLength >
     MAX_MODEL_JSON_BODY_BYTES

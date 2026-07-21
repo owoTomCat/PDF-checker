@@ -118,3 +118,17 @@ test("nginx and operations documentation preserve upload, installation, and secr
   assert.match(documentation, /not acceptable for a public or multi-user deployment|不适用于公开或多用户部署/i);
   assert.match(documentation, /dist\/audit-worker\.mjs/);
 });
+
+test("release activation uses an atomic same-parent symlink and protects a first directory migration", async () => {
+  const source = await readFile(new URL("../deploy/activate-release.sh", import.meta.url), "utf8");
+
+  assert.match(source, /^set -euo pipefail$/m);
+  assert.match(source, /PDF_CHECKER_ROOT/);
+  assert.match(source, /\$releases\/\$commit/);
+  assert.match(source, /dist\/audit-worker\.mjs/);
+  assert.match(source, /\.current\.next\./);
+  assert.match(source, /\.current\.pre-symlink\./);
+  assert.match(source, /mv -Tf/);
+  assert.match(source, /readlink -f/);
+  assert.match(source, /trap/);
+});

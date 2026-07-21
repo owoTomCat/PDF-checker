@@ -1,4 +1,4 @@
-import { AuditTaskDetailSchema } from "../task-contracts";
+import { LegacyTaskImportItemSchema } from "../task-contracts";
 import type { AuditTaskDetail } from "../types";
 
 export const LEGACY_TASK_STORAGE_KEY = "pdf-audit-workspace.tasks.v4";
@@ -147,46 +147,49 @@ function terminalLegacyTask(value: unknown): AuditTaskDetail | null {
   }
   const fileName = source.fileName.replaceAll("\\", "/").split("/").at(-1)?.slice(0, 255);
   if (!fileName) return null;
-  const outcome =
-    source.outcome === "passed" ||
-    source.outcome === "issues_found" ||
-    source.outcome === "needs_review" ||
-    source.outcome === "failed"
-      ? source.outcome
-      : source.status === "failed"
-        ? "failed"
-        : null;
-  const errorCode =
-    typeof source.errorCode === "string" && /^[A-Z0-9_]{1,100}$/.test(source.errorCode)
-      ? source.errorCode
-      : source.status === "failed"
-        ? "INTERNAL_ERROR"
-        : null;
-  const candidate = {
+  const base = {
     id: source.id.slice(0, 200),
     fileName,
     fileSize: source.fileSize,
     fileType: typeof source.fileType === "string" ? source.fileType.slice(0, 255) : null,
     status: source.status,
-    outcome,
-    model: source.model === "qwen3.7-plus" ? source.model : null,
-    progress: 100,
     processedPages: source.processedPages,
     totalPages: source.totalPages ?? null,
     createdAt: source.createdAt,
     updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : source.createdAt,
     startedAt: typeof source.startedAt === "string" ? source.startedAt : null,
     completedAt: typeof source.completedAt === "string" ? source.completedAt : null,
-    errorCode,
-    errorMessage: source.status === "failed" ? "历史任务处理失败。" : null,
-    issueCount: source.issueCount ?? null,
-    summary: source.summary ?? null,
     pdfExpiresAt: null,
     pdfAvailable: false,
-    reportText: typeof source.reportText === "string" ? source.reportText : null,
-    report: source.report ?? null,
   };
-  const parsed = AuditTaskDetailSchema.safeParse(candidate);
+  const candidate = source.status === "failed"
+    ? {
+      ...base,
+      // v4 browser failures did not have a durable code and could retain model
+      // output in their message. Import a safe terminal representation instead.
+      outcome: "failed",
+      model: null,
+      progress: 100,
+      errorCode: "INTERNAL_ERROR",
+      errorMessage: "历史任务处理失败。",
+      issueCount: null,
+      summary: null,
+      reportText: null,
+      report: null,
+    }
+    : {
+      ...base,
+      outcome: source.outcome,
+      model: source.model,
+      progress: source.progress,
+      errorCode: null,
+      errorMessage: null,
+      issueCount: source.issueCount ?? null,
+      summary: source.summary ?? null,
+      reportText: typeof source.reportText === "string" ? source.reportText : null,
+      report: source.report ?? null,
+    };
+  const parsed = LegacyTaskImportItemSchema.safeParse(candidate);
   return parsed.success ? parsed.data : null;
 }
 

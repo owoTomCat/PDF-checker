@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { MAX_PDF_BYTES } from "../ai/contracts";
 import {
   BatchDeleteRequestSchema,
   AuditTaskDetailSchema,
@@ -10,6 +11,11 @@ import {
   TaskListQuerySchema,
 } from "../task-contracts";
 import { RequestGuardError } from "./request-guards";
+import {
+  parseBoundedFormData,
+  parseBoundedJson,
+  RequestBodyTooLargeError,
+} from "./bounded-request";
 import {
   TaskFileError,
   type TaskFileOperations,
@@ -24,6 +30,9 @@ import { taskOwnerFromRequest } from "./task-owner";
 
 export const DEFAULT_PDF_RETENTION_HOURS = 72;
 const MAX_PDF_RETENTION_HOURS = 8_760;
+export const MAX_TASK_UPLOAD_BODY_BYTES = MAX_PDF_BYTES + 1024 * 1024;
+export const MAX_LEGACY_IMPORT_BODY_BYTES = 1_310_720;
+export const MAX_BATCH_DELETE_BODY_BYTES = 64 * 1024;
 
 export function parsePdfRetentionHours(
   value: string | number | undefined,
@@ -74,6 +83,10 @@ function taskApiErrorResponse(error: unknown): Response {
 
 function invalidInput() {
   return new TaskApiError("INVALID_INPUT", 422, "The task request is invalid.");
+}
+
+function requestTooLarge() {
+  return new TaskApiError("REQUEST_TOO_LARGE", 413, "The task request is too large.");
 }
 
 function taskNotFound() {
@@ -131,12 +144,7 @@ export class TaskApi {
     let committed = false;
     try {
       const ownerEmail = taskOwnerFromRequest(request, this.env);
-      let form: FormData;
-      try {
-        form = await request.formData();
-      } catch {
-        throw invalidInput();
-      }
+      const form = await this.requestFormData(request);
       const values = form.getAll("pdf");
       if (values.length !== 1 || !(values[0] instanceof File)) throw invalidInput();
       const file = values[0];
@@ -236,7 +244,9 @@ export class TaskApi {
   async batchRemove(request: Request): Promise<Response> {
     try {
       const ownerEmail = taskOwnerFromRequest(request, this.env);
-      const parsed = BatchDeleteRequestSchema.safeParse(await this.requestJson(request));
+      const parsed = BatchDeleteRequestSchema.safeParse(
+        await this.requestJson(request, MAX_BATCH_DELETE_BODY_BYTES),
+      );
       if (!parsed.success) throw invalidInput();
       const removed = this.repository.deleteOwnedTerminalPending(ownerEmail, parsed.data.ids, new Date().toISOString());
       if (removed.active) throw taskActive();
@@ -250,7 +260,9 @@ export class TaskApi {
   async importLegacy(request: Request): Promise<Response> {
     try {
       const ownerEmail = taskOwnerFromRequest(request, this.env);
-      const parsed = TaskImportRequestSchema.safeParse(await this.requestJson(request));
+      const parsed = TaskImportRequestSchema.safeParse(
+        await this.requestJson(request, MAX_LEGACY_IMPORT_BODY_BYTES),
+      );
       if (!parsed.success) throw invalidInput();
       const tasks = parsed.data.tasks.map((task) => ({
         ...task,
@@ -274,10 +286,20 @@ export class TaskApi {
     return summary;
   }
 
-  private async requestJson(request: Request): Promise<unknown> {
+  private async requestFormData(request: Request): Promise<FormData> {
     try {
-      return await request.json();
-    } catch {
+      return await parseBoundedFormData(request, MAX_TASK_UPLOAD_BODY_BYTES);
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) throw requestTooLarge();
+      throw invalidInput();
+    }
+  }
+
+  private async requestJson(request: Request, maxBytes: number): Promise<unknown> {
+    try {
+      return await parseBoundedJson(request, maxBytes);
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) throw requestTooLarge();
       throw invalidInput();
     }
   }

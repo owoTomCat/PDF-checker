@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildFinalAuditResult } from "../lib/audit-result";
+import { strictFinalizeRequest } from "./strict-fixtures";
 import {
   LEGACY_MIGRATION_MARKER_KEY,
   LEGACY_TASK_STORAGE_KEY,
   migrateLegacyTaskHistory,
 } from "../lib/client/task-history";
 import type { AuditTaskDetail } from "../lib/types";
+
+const legacyResult = buildFinalAuditResult(strictFinalizeRequest);
 
 class MemoryStorage {
   readonly values = new Map<string, string>();
@@ -21,8 +25,8 @@ function legacyTask(overrides: Record<string, unknown> = {}) {
     fileSize: 100,
     fileType: "application/pdf",
     status: "completed",
-    outcome: "passed",
-    model: "qwen3.7-plus",
+    outcome: legacyResult.outcome,
+    model: legacyResult.model,
     progress: 100,
     processedPages: 1,
     totalPages: 1,
@@ -32,10 +36,10 @@ function legacyTask(overrides: Record<string, unknown> = {}) {
     completedAt: "2026-07-18T00:01:00.000Z",
     errorCode: null,
     errorMessage: null,
-    issueCount: 0,
-    summary: null,
-    reportText: null,
-    report: null,
+    issueCount: legacyResult.report.issues.length,
+    summary: legacyResult.summary,
+    reportText: legacyResult.reportText,
+    report: legacyResult.report,
     localAbsolutePath: "C:\\private\\case.pdf",
     fileBlob: { unsafe: true },
     ...overrides,
@@ -137,6 +141,53 @@ test("empty and nonimportable legacy histories are marked and removed without an
     assert.ok(storage.getItem(LEGACY_MIGRATION_MARKER_KEY));
     assert.equal(storage.getItem(LEGACY_TASK_STORAGE_KEY), null);
   }
+});
+
+test("migration skips completed legacy tasks without a verified final report", async () => {
+  const storage = new MemoryStorage();
+  storage.setItem(LEGACY_TASK_STORAGE_KEY, JSON.stringify([
+    legacyTask({ summary: null, reportText: null, report: null, issueCount: null }),
+  ]));
+  let calls = 0;
+
+  const result = await migrateLegacyTaskHistory(storage, async () => {
+    calls += 1;
+    return 0;
+  });
+
+  assert.equal(result.status, "skipped");
+  assert.equal(calls, 0);
+});
+
+test("migration imports a genuine legacy failure with a safe canonical failure result", async () => {
+  const storage = new MemoryStorage();
+  storage.setItem(LEGACY_TASK_STORAGE_KEY, JSON.stringify([
+    legacyTask({
+      status: "failed",
+      outcome: "failed",
+      // Browser-side v4 failures retained the selected model and did not persist
+      // a stable error code. They are still terminal historical records.
+      model: "qwen3.7-plus",
+      errorCode: null,
+      errorMessage: "C:\\private\\model response details",
+      issueCount: null,
+      summary: null,
+      reportText: null,
+      report: null,
+    }),
+  ]));
+  let received: AuditTaskDetail[] = [];
+
+  const result = await migrateLegacyTaskHistory(storage, async (tasks) => {
+    received = tasks;
+    return tasks.length;
+  });
+
+  assert.deepEqual(result, { status: "imported", imported: 1 });
+  assert.equal(received[0]?.status, "failed");
+  assert.equal(received[0]?.model, null);
+  assert.equal(received[0]?.errorCode, "INTERNAL_ERROR");
+  assert.equal(received[0]?.errorMessage, "历史任务处理失败。");
 });
 
 test("a marker prevents repeat import and later mounts retry best-effort legacy cleanup", async () => {

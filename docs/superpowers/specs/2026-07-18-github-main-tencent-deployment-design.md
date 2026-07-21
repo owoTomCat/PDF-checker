@@ -1,5 +1,21 @@
 # GitHub main 与腾讯云部署设计
 
+## 原子 release 激活（补充）
+
+每次发布在 `/opt/pdf-checker/releases/<commit>` 完成构建后，先停止
+`pdf-checker-worker.service`，再停止 `pdf-checker.service`，然后运行：
+
+```bash
+sudo bash "/opt/pdf-checker/releases/$commit/deploy/activate-release.sh" "$commit"
+```
+
+该脚本验证 commit、release 路径和 `dist/audit-worker.mjs`，并用同父目录临时
+symlink 的 rename 原子切换 `current`。如果旧 `current` 仍是普通目录，脚本先将其
+保留为 `.current.pre-symlink.*`，在切换第二步失败时自动恢复。健康检查成功前不要删除
+该目录；若 web 或 worker 重启失败，停止两项服务并把这个目录重命名回 `current`，再用
+旧目录的 unit 启动。后续两个 symlink release 之间的回滚只需用相同脚本重新激活已验证
+的旧 commit。私有 `/var/lib/pdf-checker` 数据目录绝不参与此切换。
+
 ## 目标与边界
 
 GitHub `main` 对应腾讯云 Ubuntu 24.04 上的同一发布提交。应用代码位于 `/opt/pdf-checker/current`，私有 PDF、SQLite 数据库和备份位于 `/var/lib/pdf-checker`。发布、回滚或代码目录切换绝不能清除该数据目录。
